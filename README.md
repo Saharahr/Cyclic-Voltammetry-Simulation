@@ -156,7 +156,7 @@ cyclic voltammetry, combining diffusion physics with Butler–Volmer kinetics.
 The model reproduces key experimental observables such as peak currents,
 peak separation, and diffusion-limited current decay, providing a robust
 framework for studying reversible and quasi-reversible electrochemical systems.
----
+---igi
 References
 
 Elgrishi et al., A Practical Beginner’s Guide to Cyclic Voltammetry,
