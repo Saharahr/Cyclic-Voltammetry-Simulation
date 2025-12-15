@@ -94,7 +94,7 @@ The results were obtained using:
 
 ### Simulated cyclic voltammogram
 
-![Diffusion equation](plots/diffusion_equation.png)
+![Diffusion equation](plots/cv_duck_shape.png)
 
 ### Quantitative peak analysis
 
