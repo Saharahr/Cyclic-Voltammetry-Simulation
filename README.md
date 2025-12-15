@@ -24,44 +24,29 @@ The redox reaction is:
 
 ### Governing equation (diffusion)
 
-\[
-\frac{\partial C_O}{\partial t}
-=
-D \frac{\partial^2 C_O}{\partial x^2}
-\]
+The oxidized species concentration follows Fick’s second law:
+
+dC_O/dt = D · d²C_O/dx²
 
 Mass conservation is enforced:
 
-\[
-C_O + C_R = C_{bulk}
-\]
+C_O + C_R = C_bulk
 
 ### Electrode kinetics (Butler–Volmer)
 
-\[
-j =
-n F k_0
-\left[
-C_O(0,t)e^{-\alpha F\eta/RT}
--
-C_R(0,t)e^{(1-\alpha)F\eta/RT}
-\right]
-\]
+The interfacial current density is given by:
 
-### Boundary conditions
+j = n F k0 [ C_O(0,t) · exp(-αFη/RT) − C_R(0,t) · exp((1−α)Fη/RT) ]
 
-- **Electrode (x = 0)**  
-  Flux boundary condition:
-  \[
-  -D \frac{\partial C_O}{\partial x}\Big|_{0} = \frac{j}{nF}
-  \]
+**Electrode (x = 0)**  
+Flux boundary condition:
 
-- **Bulk (x = L)**  
-  \[
-  C_O(L,t) = C_{bulk}
-  \]
+−D (∂C_O/∂x)|_(x=0) = j / (nF)
 
-This represents **classical semi-infinite diffusion**.
+**Bulk (x = L)**  
+C_O(L,t) = C_bulk
+
+This represents classical semi-infinite diffusion.
 
 ---
 
@@ -109,29 +94,24 @@ The results were obtained using:
 
 ### Simulated cyclic voltammogram
 
-![Cyclic Voltammogram](plots/cv_duck_shape.png)
+![Diffusion equation](plots/diffusion_equation.png)
 
 ### Quantitative peak analysis
 
 The automatically extracted peak parameters are:
 
 - **Cathodic peak (forward scan):**
-  - \( E_{p,c} = -0.0302 \, \text{V} \)
-  - \( i_{p,c} = 44.74 \, \mu\text{A} \)
-
+  - (E_pc = -0.0302 V)
+  - (i_pc = 44.74 µA)
 - **Anodic peak (reverse scan):**
-  - \( E_{p,a} = 0.0308 \, \text{V} \)
-  - \( i_{p,a} = -32.16 \, \mu\text{A} \)
+  - ( E_pa = 0.0308 V)
+  - ( i_pa = -32.16 µA)
 
 - **Peak separation:**
-  \[
-  \Delta E_p = 61.0 \, \text{mV}
-  \]
+  ΔE_p = 61.0 mV
 
 - **Peak current ratio:**
-  \[
-  \left| \frac{i_{p,a}}{i_{p,c}} \right| = 0.719
-  \]
+  |i_pa / i_pc| = 0.719
 
 ### Interpretation
 
@@ -156,7 +136,8 @@ cyclic voltammetry, combining diffusion physics with Butler–Volmer kinetics.
 The model reproduces key experimental observables such as peak currents,
 peak separation, and diffusion-limited current decay, providing a robust
 framework for studying reversible and quasi-reversible electrochemical systems.
----igi
+---
+
 References
 
 Elgrishi et al., A Practical Beginner’s Guide to Cyclic Voltammetry,
