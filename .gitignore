@@ -28,6 +28,8 @@ Thumbs.db
 *.tmp
 *.bak
 
-# Plots (keep folder, ignore raw auto-generated files if desired)
-plots/*.png
-!plots/example.png
+# Ignore all plots by default
+plots/*
+
+# Track the main result figure
+!plots/cv_duck_shape.png
