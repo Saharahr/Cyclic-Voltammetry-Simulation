@@ -1,0 +1,46 @@
+┌─────────────────────────────────────────────────────────────┐
+│                    OUR SIMULATION                           │
+│                                                             │
+│   1. Fick's Law (Diffusion)     ∂C/∂t = D ∂²C/∂x²           │
+│                                                             │
+│   2. Butler-Volmer (Kinetics)   j = nFk₀[Cₒe^(-αβη) - Cᵣe^((1-α)βη)]  │
+│                                                             │
+│   3. Mass Conservation          Flux at electrode = reaction rate     │
+│                                                             │
+│   Solved numerically with Crank-Nicolson + Picard iteration │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+                     Current i(t) emerges
+                     from the simulation
+
+------------------------------------------------------------
+RESULTS:
+------------------------------------------------------------
+
+Cycle 1:
+  Anodic peak:   E_pa = +0.0290 V,  i_pa = +22.47 µA
+  Cathodic peak: E_pc = -0.0297 V,  i_pc = -16.17 µA
+  ΔEp = 58.7 mV
+  |ipa/ipc| = 1.3894
+
+Cycle 2:
+  Anodic peak:   E_pa = +0.0295 V,  i_pa = +20.68 µA
+  Cathodic peak: E_pc = -0.0296 V,  i_pc = -16.98 µA
+  ΔEp = 59.1 mV
+  |ipa/ipc| = 1.2176
+
+Cycle 3:
+  Anodic peak:   E_pa = +0.0296 V,  i_pa = +20.19 µA
+  Cathodic peak: E_pc = -0.0296 V,  i_pc = -17.32 µA
+  ΔEp = 59.1 mV
+  |ipa/ipc| = 1.1659
+
+------------------------------------------------------------
+THEORETICAL COMPARISON:
+------------------------------------------------------------
+  Expected ΔEp (reversible): 59.0 mV
+  Expected |ipa/ipc| (steady state): 1.0
+
+  Randles-Sevcik theoretical i_p: 22.57 µA
+  Simulated i_pa (last cycle):   20.19 µA
