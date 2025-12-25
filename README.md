@@ -261,9 +261,7 @@ relax ≈ 0.05-0.10   (prevent oscillation)
 ## Contributing
 
 Contributions are welcome! Please feel free to submit issues or pull requests.
-
 ---
-
 ## Contact
 
 For questions or feedback, please open an issue on GitHub.
