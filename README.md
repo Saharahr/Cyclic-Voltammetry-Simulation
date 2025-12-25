@@ -94,28 +94,28 @@ The results were obtained using:
 
 ### Simulated cyclic voltammogram
 
-![Diffusion equation](plots/cv_duck_shape.png)
+![Diffusion equation](plots/cv_stable.png)
 
 ### Quantitative peak analysis
 
 The automatically extracted peak parameters are:
 
 - **Cathodic peak (forward scan):**
-  - (E_pc = -0.0302 V)
-  - (i_pc = 44.74 µA)
+  - E_pc = -0.0296 V,
+  - i_pc = -17.32 µA
 - **Anodic peak (reverse scan):**
-  - ( E_pa = 0.0308 V)
-  - ( i_pa = -32.16 µA)
+  - E_pa = 0.0296 V
+  - i_pa = 20.19 µA
 
 - **Peak separation:**
-  ΔE_p = 61.0 mV
+  ΔE_p = 59.1 mV
 
 - **Peak current ratio:**
-  |i_pa / i_pc| = 0.719
+  |i_pa / i_pc| = 1.1659
 
 ### Interpretation
 
-- The peak separation of approximately **61 mV** is close to the theoretical
+- The peak separation of approximately **59.1 mV** is close to the theoretical
   value of **59 mV** expected for a reversible one-electron redox process at
   room temperature.
 - The unequal peak magnitudes indicate **quasi-reversible behavior**, caused
@@ -137,7 +137,8 @@ The model reproduces key experimental observables such as peak currents,
 peak separation, and diffusion-limited current decay, providing a robust
 framework for studying reversible and quasi-reversible electrochemical systems.
 ---
-
+Desinged By Sahar Ahrari
+---
 References
 
 Elgrishi et al., A Practical Beginner’s Guide to Cyclic Voltammetry,
