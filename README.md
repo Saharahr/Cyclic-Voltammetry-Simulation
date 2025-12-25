@@ -2,22 +2,6 @@
 
 A Python-based numerical simulation of cyclic voltammetry for a two-species redox system using the Crank-Nicolson finite difference method with Butler-Volmer electrode kinetics.
 
-![CV Simulation](plots/cv_stable.png)
-
-
-- [Overview](#overview)
-- [Physical System](#physical-system)
-- [Features](#features)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Results](#results)
-- [Theory](#theory)
-- [Parameters](#parameters)
-- [File Structure](#file-structure)
-- [License](#license)
-
----
-
 ## Overview
 
 This project simulates the electrochemical technique of **Cyclic Voltammetry (CV)**, which is widely used in electrochemistry to study redox reactions, determine formal potentials, and characterize electrode kinetics.
@@ -96,13 +80,13 @@ pip install scipy
 ### Basic Usage
 
 ```bash
-python cv_stable_commented.py
+python cv_reversible.py
 ```
 
 ### Custom Parameters
 
 ```python
-from cv_stable_commented import simulate_cv_stable, plot_results
+from cv_reversible.py import simulate_cv_stable, plot_results
 
 # Run simulation with custom parameters
 result = simulate_cv_stable(

@@ -1,202 +1,167 @@
 """
-Two-species 1D Cyclic Voltammetry (CV) Simulation
-============================================================================
-
-PHYSICAL SYSTEM:
-================
-    Redox couple:   O + n e-  <-->  R
+    This code simulates Cyclic Voltammetry (CV) for a simple redox reaction:
     
-    At the electrode surface, oxidized species (O) can gain electrons to become
-    reduced species (R), or R can lose electrons to become O.
+        O + n e⁻  ⇌  R
+        
+    Where:
+    - O = Oxidized species (electron acceptor)
+    - R = Reduced species (electron donor)  
+    - n = Number of electrons transferred (typically 1)
+    
+    Example: Fe³⁺ + e⁻ ⇌ Fe²⁺
 
-WHAT THIS CODE SOLVES:
-======================
-    1. Fick's Second Law (diffusion): ∂C/∂t = D ∂²C/∂x²
-       - Describes how species concentrations change due to diffusion
-       - Species move from high concentration to low concentration
+WHAT IS CYCLIC VOLTAMMETRY?
+===========================
+    CV is an electrochemical technique where:
+    1. The electrode potential is swept linearly from E_start to E_switch
+    2. Then swept back from E_switch to E_start
+    3. Current is measured as a function of potential
+    
+    The resulting current-potential curve reveals:
+    - Peak positions → thermodynamics (formal potential E⁰)
+    - Peak separation → kinetics (how fast electron transfer is)
+    - Peak heights → concentration and diffusion coefficient
+
+GOVERNING EQUATIONS:
+====================
+    1. Fick's Second Law (diffusion in solution):
+       ∂C/∂t = D ∂²C/∂x²
        
-    2. Butler-Volmer equation (electrode kinetics):
-       j = nFk₀[Cₒ·exp(-αβη) - Cᵣ·exp((1-α)βη)]
-       - Describes how fast electron transfer occurs at electrode surface
-       - η = E - E⁰ is the overpotential (driving force for reaction)
+       - C = concentration [mol/cm³]
+       - D = diffusion coefficient [cm²/s]
+       - x = distance from electrode [cm]
+       - t = time [s]
+       
+    2. Butler-Volmer Equation (electrode kinetics):
+       j = nFk₀[Cₒ(0)·exp(-αβη) - Cᵣ(0)·exp((1-α)βη)]
+       
+       - j = current density [A/cm²]
+       - k₀ = standard rate constant [cm/s]
+       - η = E - E⁰ = overpotential [V]
+       - α = transfer coefficient (typically 0.5)
+       - β = nF/RT ≈ 38.9 V⁻¹ at 25°C
 
-NUMERICAL METHODS USED:
-=======================
-    1. Crank-Nicolson method: Solves diffusion equation (stable, 2nd order accurate)
-    2. Thomas algorithm: Efficiently solves the tridiagonal matrix system
-    3. Picard iteration: Handles the nonlinear coupling between current and concentration
+NUMERICAL METHODS:
+==================
+    1. Crank-Nicolson: Solves diffusion equation (implicit, stable, 2nd order)
+    2. Thomas Algorithm: Efficiently solves tridiagonal matrix systems O(n)
+    3. Picard Iteration: Handles nonlinear coupling between current and concentration
 
-SIGN CONVENTION (Ossila-style):
+SIGN CONVENTION:
 ===============================
     - Oxidation (R → O + e⁻): POSITIVE current (anodic)
     - Reduction (O + e⁻ → R): NEGATIVE current (cathodic)
 """
 
 from __future__ import annotations
-
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+from time import perf_counter
+
 
 # =============================================================================
 # FUNDAMENTAL PHYSICAL CONSTANTS
 # =============================================================================
-# These are universal constants
+# These are universal constants from CODATA - never modify these values!
 
-F = 96485.33212       # Faraday constant [C/mol] - charge of 1 mole of electrons
-R_gas = 8.314462618   # Universal gas constant [J/(mol·K)] - relates energy to temperature
+F = 96485.33212       # Faraday constant [C/mol]
+                      # = charge of 1 mole of electrons
+                      # = N_A × e (Avogadro's number × electron charge)
+
+R_gas = 8.314462618   # Universal gas constant [J/(mol·K)]
+                      # Relates thermal energy to temperature
+                      # Appears in Nernst equation and Butler-Volmer
 
 
 # =============================================================================
-# UTILITY FUNCTIONS
+# POTENTIAL WAVEFORM FUNCTION
+# =============================================================================
 
-def safe_exp(x: float, clamp: float = 50.0) -> float:
+def triangular_potential(t, E_start, E_switch, v):
     """
-    Compute exponential with protection against overflow/underflow.
+    Generate the triangular potential waveform for cyclic voltammetry.
     
-    WHY NEEDED:
-        In Butler-Volmer equation, we compute exp(±αβη) where β ≈ 38.9 V⁻¹
-        If η = 2V, then αβη ≈ 39, and exp(39) ≈ 10^17 (huge!)
-        If η = -2V, then exp(-39) ≈ 10^-17 (tiny!)
-        
-        Without clamping, we get numerical overflow/underflow errors.
-    
-    HOW IT WORKS:
-        Limits the exponent to [-clamp, +clamp] before computing exp()
-        exp(50) ≈ 5×10^21 is large but still representable
-        exp(-50) ≈ 2×10^-22 is small but still representable
-    
-    Parameters:
-        x: The exponent value
-        clamp: Maximum absolute value allowed (default 50)
-    
-    Returns:
-        exp(x) with x clamped to [-clamp, +clamp]
-    """
-    return float(np.exp(np.clip(x, -clamp, clamp)))
+    WHAT THIS CREATES:
+    ==================
+        The potential E(t) that is applied to the electrode over time.
+        For CV, this is a triangular wave:
 
-
-def triangular_potential_multicycle(
-    t: np.ndarray, 
-    E_start: float, 
-    E_switch: float, 
-    v: float,
-    n_cycles: int = 1
-) -> np.ndarray:
-    """
-    Generate triangular potential waveform for cyclic voltammetry.
-    
-    WHAT THIS DOES:
-        Creates the E(t) signal that looks like this for one cycle:
-        
-        E_switch ──────►  /\
-                         /  \
-                        /    \
-        E_start  ──────►      \/
-                        
-                       |──────|──────|
-                         t_half  t_half
-                       |─── t_cycle ──|
-    
     THE PHYSICS:
-        - Potential changes linearly with time at rate v (scan rate)
-        - Forward scan: E goes from E_start toward E_switch
-        - Reverse scan: E returns from E_switch to E_start
-        - Multiple cycles repeat this pattern
+    ============
+        - Scan rate v [V/s] determines how fast potential changes
+        - dE/dt = ±v (positive on forward scan, negative on reverse)
+        - t_half = |E_switch - E_start| / v = time for one half-cycle
+        - t_cycle = 2 × t_half = time for complete cycle
+    
+    WHY VECTORIZED:
+    ===============
+        Using np.where instead of a Python for-loop makes this
+        ~100x faster for large arrays.
     
     Parameters:
-        t: Array of time points [seconds]
-        E_start: Starting potential [V]
-        E_switch: Switching potential (vertex) [V]
-        v: Scan rate [V/s] - how fast potential changes
-        n_cycles: Number of complete cycles
+    -----------
+        t : np.ndarray
+            Array of time points [seconds]
+        E_start : float
+            Starting potential [V] - where the sweep begins
+        E_switch : float  
+            Switching potential [V] - vertex of the triangle
+        v : float
+            Scan rate [V/s] - how fast potential changes
     
     Returns:
-        E: Array of potential values at each time point [V]
+    --------
+        E : np.ndarray
+            Potential at each time point [V]
     
     Example:
-        E_start = -0.25V, E_switch = +0.25V, v = 0.2 V/s
-        t_half = |0.25 - (-0.25)| / 0.2 = 2.5 seconds per half-cycle
-        t_cycle = 5.0 seconds per full cycle
+    --------
+        E_start = -0.25 V, E_switch = +0.25 V, v = 0.2 V/s
+        |E_switch - E_start| = 0.5 V
+        t_half = 0.5 / 0.2 = 2.5 seconds
+        t_cycle = 5.0 seconds
     """
-    # Calculate timing parameters
+    # Calculate the potential range and direction
     dE = E_switch - E_start           # Total potential change [V]
-    t_half = abs(dE) / v              # Time for half cycle (forward OR reverse) [s]
-    t_cycle = 2.0 * t_half            # Time for complete cycle [s]
-    s = 1.0 if dE >= 0 else -1.0      # Sign: +1 if scanning positive, -1 if scanning negative
+    t_half = abs(dE) / v              # Time for half cycle [s]
+    t_cycle = 2.0 * t_half            # Time for full cycle [s]
     
-    # Build potential array
-    E = np.empty_like(t, dtype=float)
-    for k, tk in enumerate(t):
-        # Use modulo to find position within current cycle
-        # This automatically handles multiple cycles
-        t_in_cycle = tk % t_cycle
-        
-        if t_in_cycle <= t_half:
-            # FORWARD SCAN: Moving from E_start toward E_switch
-            # E increases (or decreases) linearly with time
-            E[k] = E_start + s * v * t_in_cycle
-        else:
-            # REVERSE SCAN: Moving from E_switch back to E_start
-            # E decreases (or increases) linearly with time
-            E[k] = E_switch - s * v * (t_in_cycle - t_half)
+    # Direction sign: +1 if scanning positive, -1 if scanning negative
+    s = 1.0 if dE >= 0 else -1.0
+    
+    # Use modulo to handle multiple cycles automatically
+    # t % t_cycle gives the time position within the current cycle
+    t_in_cycle = t % t_cycle
+    
+    # Boolean mask: True for forward scan, False for reverse scan
+    forward_mask = t_in_cycle <= t_half
+    
+    # Vectorized potential calculation using np.where
+    # np.where(condition, value_if_true, value_if_false)
+    E = np.where(
+        forward_mask,
+        # FORWARD SCAN: E increases from E_start toward E_switch
+        E_start + s * v * t_in_cycle,
+        # REVERSE SCAN: E decreases from E_switch back to E_start  
+        E_switch - s * v * (t_in_cycle - t_half)
+    )
     
     return E
 
 
-def clamp_scalar(x: float, lo: float, hi: float) -> float:
-    """
-    Clamp a value to be within [lo, hi] range.
-    
-    WHY NEEDED:
-        - Prevents current from becoming unrealistically large
-        - Helps stabilize the Picard iteration
-        - Acts as a safety limit
-    
-    Parameters:
-        x: Value to clamp
-        lo: Minimum allowed value
-        hi: Maximum allowed value
-    
-    Returns:
-        x if lo ≤ x ≤ hi, otherwise lo or hi
-    """
-    if x < lo:
-        return lo
-    if x > hi:
-        return hi
-    return x
-
-
-def finite_scalar(x: float, default: float = 0.0) -> float:
-    """
-    Return x if it's a valid finite number, otherwise return default.
-    
-    WHY NEEDED:
-        Numerical errors can produce NaN (Not a Number) or Inf (Infinity).
-        This function catches those and replaces them with a safe default.
-    
-    Parameters:
-        x: Value to check
-        default: Value to return if x is NaN or Inf
-    
-    Returns:
-        x if finite, else default
-    """
-    return x if np.isfinite(x) else default
-
-
 # =============================================================================
-# TRIDIAGONAL MATRIX SOLVER (THOMAS ALGORITHM)
+# THOMAS ALGORITHM (TRIDIAGONAL MATRIX SOLVER)
 # =============================================================================
 
-def thomas_solve_inplace(a: np.ndarray, b: np.ndarray, c: np.ndarray, d: np.ndarray) -> np.ndarray:
+def thomas_solve(a, b, c, d):
     """
-    Solve a tridiagonal system of equations using the Thomas algorithm.
+    Solve a tridiagonal system of linear equations using the Thomas algorithm.
     
     WHAT IS A TRIDIAGONAL SYSTEM?
     =============================
-        A system where the matrix has non-zero elements only on three diagonals:
+        A system of equations where the matrix has non-zero elements
+        only on three diagonals (lower, main, upper):
         
         | b₀  c₀   0   0   0  |   | x₀ |   | d₀ |
         | a₀  b₁  c₁   0   0  |   | x₁ |   | d₁ |
@@ -204,106 +169,118 @@ def thomas_solve_inplace(a: np.ndarray, b: np.ndarray, c: np.ndarray, d: np.ndar
         |  0   0  a₂  b₃  c₃  |   | x₃ |   | d₃ |
         |  0   0   0  a₃  b₄  |   | x₄ |   | d₄ |
         
-        - b: main diagonal (center)
-        - a: lower diagonal (below main) - has n-1 elements
-        - c: upper diagonal (above main) - has n-1 elements
-        - d: right-hand side vector
-    
-    WHY THIS STRUCTURE?
-    ===================
-        The Crank-Nicolson discretization of the diffusion equation:
-        
-        -λ/2 · Cᵢ₋₁ⁿ⁺¹ + (1+λ) · Cᵢⁿ⁺¹ - λ/2 · Cᵢ₊₁ⁿ⁺¹ = RHS
-        
-        Each equation involves only 3 neighboring points, giving tridiagonal structure.
+        This structure arises from discretizing the 1D diffusion equation.
     
     WHY THOMAS ALGORITHM?
     =====================
-        - General matrix solve: O(n³) operations
+        - General matrix solve (Gaussian elimination): O(n³) operations
         - Thomas algorithm: O(n) operations - MUCH faster!
-        - Perfect for 1D diffusion problems
+        - Perfect for 1D problems where only neighboring points interact
     
-    HOW IT WORKS (2 phases):
-    ========================
-        Phase 1 - Forward Elimination:
-            Eliminate the lower diagonal by subtracting rows
-            Transform into upper triangular form
+    HOW IT WORKS:
+    =============
+        PHASE 1 - Forward Elimination:
+            Eliminate the lower diagonal by row operations.
+            Transform the system into upper triangular form.
             
-        Phase 2 - Back Substitution:
-            Solve from bottom to top
-            Each unknown depends only on the one below it
+            For each row i (starting from 1):
+                w = a[i-1] / b[i-1]        # Multiplier
+                b[i] = b[i] - w × c[i-1]   # Update diagonal
+                d[i] = d[i] - w × d[i-1]   # Update RHS
+        
+        PHASE 2 - Back Substitution:
+            Solve from bottom to top.
+            
+            x[n-1] = d[n-1] / b[n-1]       # Last equation
+            For i from n-2 down to 0:
+                x[i] = (d[i] - c[i] × x[i+1]) / b[i]
     
     Parameters:
-        a: Lower diagonal coefficients (length n-1)
-        b: Main diagonal coefficients (length n)
-        c: Upper diagonal coefficients (length n-1)
-        d: Right-hand side vector (length n) - MODIFIED IN PLACE to contain solution
+    -----------
+        a : np.ndarray
+            Lower diagonal coefficients (length n-1)
+            a[i] is the coefficient of x[i] in equation i+1
+        b : np.ndarray
+            Main diagonal coefficients (length n)
+            b[i] is the coefficient of x[i] in equation i
+        c : np.ndarray
+            Upper diagonal coefficients (length n-1)
+            c[i] is the coefficient of x[i+1] in equation i
+        d : np.ndarray
+            Right-hand side vector (length n)
     
     Returns:
-        d: The solution vector x (overwrites input d)
+    --------
+        x : np.ndarray
+            Solution vector (length n)
     
-    Raises:
-        FloatingPointError: If matrix is singular or near-singular
+    Note:
+    -----
+        This function makes copies of b and d to avoid modifying
+        the original arrays (important for reusing matrices).
     """
-    n = b.size
-    eps = 1e-30  # Small number to detect division by zero
-
+    n = len(b)  # Number of equations/unknowns
+    
+    # Make copies to avoid modifying original arrays
+    # (We reuse the same LHS matrices for O and R species)
+    b_work = b.copy()
+    d_work = d.copy()
+    
     # =========================================================================
     # PHASE 1: FORWARD ELIMINATION
     # =========================================================================
-    # Goal: Eliminate lower diagonal (a), transform to upper triangular
+    # Goal: Transform to upper triangular form by eliminating lower diagonal
     #
-    # For each row i (starting from row 1):
-    #   1. Compute multiplier: w = a[i-1] / b[i-1]
-    #   2. Subtract w × (row i-1) from row i
-    #   3. This zeros out a[i-1] and modifies b[i] and d[i]
+    # Original:                    After elimination:
+    # | b₀  c₀   0  |             | b₀  c₀   0  |
+    # | a₀  b₁  c₁  |  ────────►  |  0  b₁' c₁  |
+    # |  0  a₁  b₂  |             |  0   0  b₂' |
     
     for i in range(1, n):
-        denom = b[i - 1]
+        # Compute the multiplier for row elimination
+        # w = coefficient below diagonal / diagonal element
+        w = a[i-1] / b_work[i-1]
         
-        # Check for division by zero (singular matrix)
-        if (not np.isfinite(denom)) or (abs(denom) < eps):
-            raise FloatingPointError(f"Thomas breakdown: b[{i-1}]={denom}")
+        # Update the diagonal element
+        # b[i] = b[i] - w × c[i-1]
+        b_work[i] -= w * c[i-1]
         
-        w = a[i - 1] / denom        # Multiplier for elimination
-        b[i] -= w * c[i - 1]        # Update diagonal element
-        d[i] -= w * d[i - 1]        # Update RHS
-
+        # Update the right-hand side
+        # d[i] = d[i] - w × d[i-1]
+        d_work[i] -= w * d_work[i-1]
+    
     # =========================================================================
     # PHASE 2: BACK SUBSTITUTION
     # =========================================================================
     # Now we have upper triangular form:
-    #   | b₀  c₀   0  |   | x₀ |   | d₀ |
-    #   |  0  b₁' c₁  | × | x₁ | = | d₁'|
-    #   |  0   0  b₂' |   | x₂ |   | d₂'|
     #
-    # Solve from bottom up:
+    # | b₀  c₀   0  |   | x₀ |   | d₀ |
+    # |  0  b₁' c₁  | × | x₁ | = | d₁'|
+    # |  0   0  b₂' |   | x₂ |   | d₂'|
+    #
+    # Solve from bottom to top:
     #   x₂ = d₂' / b₂'
-    #   x₁ = (d₁' - c₁·x₂) / b₁'
-    #   x₀ = (d₀ - c₀·x₁) / b₀
+    #   x₁ = (d₁' - c₁×x₂) / b₁'
+    #   x₀ = (d₀ - c₀×x₁) / b₀
     
-    # Solve last equation first
-    if (not np.isfinite(b[-1])) or (abs(b[-1]) < eps):
-        raise FloatingPointError(f"Thomas breakdown: b[-1]={b[-1]}")
-    d[-1] /= b[-1]
-
+    # Solve the last equation first
+    d_work[-1] /= b_work[-1]
+    
     # Solve remaining equations from bottom to top
-    for i in range(n - 2, -1, -1):
-        denom = b[i]
-        if (not np.isfinite(denom)) or (abs(denom) < eps):
-            raise FloatingPointError(f"Thomas breakdown: b[{i}]={denom}")
-        d[i] = (d[i] - c[i] * d[i + 1]) / denom
-
-    return d  # Solution is now stored in d
+    for i in range(n-2, -1, -1):
+        d_work[i] = (d_work[i] - c[i] * d_work[i+1]) / b_work[i]
+    
+    # The solution is now stored in d_work
+    return d_work
 
 
 # =============================================================================
 # CRANK-NICOLSON MATRIX BUILDER
 # =============================================================================
 
-def build_cn_lhs_neumann_right(Nx: int, lam: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def build_cn_matrices(Nx, lam):
     """
-    Build the LEFT-HAND SIDE (LHS) matrix for Crank-Nicolson scheme.
+    Build the LEFT-HAND SIDE (LHS) tridiagonal matrix for Crank-Nicolson scheme.
     
     WHAT IS CRANK-NICOLSON?
     =======================
@@ -313,498 +290,626 @@ def build_cn_lhs_neumann_right(Nx: int, lam: float) -> tuple[np.ndarray, np.ndar
         
         It averages between explicit (old time) and implicit (new time):
         
-            (Cⁿ⁺¹ - Cⁿ)/Δt = D/2 × [∂²Cⁿ⁺¹/∂x² + ∂²Cⁿ/∂x²]
+            (Cⁿ⁺¹ᵢ - Cⁿᵢ)/Δt = D/2 × [∂²Cⁿ⁺¹/∂x² + ∂²Cⁿ/∂x²]
         
-        Rearranging gives:  A · Cⁿ⁺¹ = b
-        
-        This function builds the matrix A (LHS).
+        Advantages:
+        - Unconditionally stable (no restriction on time step for stability)
+        - Second-order accurate in both time and space
+        - Implicit, so requires solving a linear system each time step
     
-    THE DISCRETIZED EQUATIONS:
-    ==========================
-        For interior points (i = 1, 2, ..., Nx-2):
-            -λ/2 · Cᵢ₋₁ⁿ⁺¹ + (1+λ) · Cᵢⁿ⁺¹ - λ/2 · Cᵢ₊₁ⁿ⁺¹ = RHS
+    DISCRETIZATION:
+    ===============
+        Using central differences for the second derivative:
         
-        Where λ = D·Δt/Δx² (the "diffusion number")
+        ∂²C/∂x² ≈ (Cᵢ₋₁ - 2Cᵢ + Cᵢ₊₁) / Δx²
         
+        The Crank-Nicolson equation for interior points becomes:
+        
+        -λ/2·Cⁿ⁺¹ᵢ₋₁ + (1+λ)·Cⁿ⁺¹ᵢ - λ/2·Cⁿ⁺¹ᵢ₊₁ = 
+         λ/2·Cⁿᵢ₋₁ + (1-λ)·Cⁿᵢ + λ/2·Cⁿᵢ₊₁
+        
+        Where λ = D·Δt/Δx² is the "diffusion number"
+    
     BOUNDARY CONDITIONS:
     ====================
-        At x=0 (electrode, i=0): 
-            Flux boundary condition (handled in RHS function)
-            (1+λ)·C₀ⁿ⁺¹ - λ·C₁ⁿ⁺¹ = RHS₀
+        Row 0 (electrode surface, x=0):
+            Flux boundary condition is incorporated via the RHS function.
+            LHS coefficients: (1+λ)·C₀ - λ·C₁ = RHS₀
             
-        At x=L (bulk, i=Nx-1):
-            Neumann BC (zero gradient): Cₙₓ₋₁ = Cₙₓ₋₂
-            This means: -1·Cₙₓ₋₂ⁿ⁺¹ + 1·Cₙₓ₋₁ⁿ⁺¹ = 0
+        Row Nx-1 (bulk solution, x=L):
+            Neumann BC: ∂C/∂x = 0 (zero flux at bulk boundary)
+            Discretized: Cₙₓ₋₁ = Cₙₓ₋₂
+            Rearranged: -Cₙₓ₋₂ + Cₙₓ₋₁ = 0
     
-    THE MATRIX STRUCTURE:
-    =====================
-        Row 0 (electrode):     | 1+λ   -λ    0    0   ...  0  |
-        Row 1 (interior):      | -λ/2  1+λ  -λ/2  0   ...  0  |
-        Row 2 (interior):      |  0   -λ/2  1+λ  -λ/2 ...  0  |
+    MATRIX STRUCTURE:
+    =================
+        Row 0 (electrode):   | 1+λ   -λ    0    0  ... |
+        Row 1 (interior):    | -λ/2  1+λ  -λ/2  0  ... |
+        Row 2 (interior):    |  0   -λ/2  1+λ  -λ/2 ...|
         ...
-        Row Nx-1 (bulk BC):    |  0    0    ...  -1    1      |
+        Row Nx-1 (bulk BC):  |  0    0   ...  -1    1  |
     
     Parameters:
-        Nx: Number of spatial grid points
-        lam: λ = D·Δt/Δx² (diffusion number, dimensionless)
+    -----------
+        Nx : int
+            Number of spatial grid points
+        lam : float
+            Diffusion number λ = D·Δt/Δx² (dimensionless)
+            Should be < 1 for good accuracy (though CN is stable for any λ)
     
     Returns:
-        a: Lower diagonal (length Nx-1)
-        b: Main diagonal (length Nx)
-        c: Upper diagonal (length Nx-1)
+    --------
+        a : np.ndarray
+            Lower diagonal coefficients (length Nx-1)
+        b : np.ndarray
+            Main diagonal coefficients (length Nx)
+        c : np.ndarray
+            Upper diagonal coefficients (length Nx-1)
     """
-    n = Nx
+    # Initialize arrays for the three diagonals
+    a = np.zeros(Nx - 1)   # Lower diagonal (below main)
+    b = np.zeros(Nx)        # Main diagonal
+    c = np.zeros(Nx - 1)   # Upper diagonal (above main)
     
-    # Initialize diagonal arrays
-    a = np.zeros(n - 1, dtype=float)  # Lower diagonal
-    b = np.zeros(n, dtype=float)       # Main diagonal
-    c = np.zeros(n - 1, dtype=float)   # Upper diagonal
-
     # -------------------------------------------------------------------------
-    # ROW 0: Electrode surface boundary (x = 0)
+    # ROW 0: Electrode surface boundary condition
     # -------------------------------------------------------------------------
-    # Flux BC is incorporated via the RHS, so LHS just has:
-    # (1+λ)·C₀ - λ·C₁ = RHS₀
-    b[0] = 1.0 + lam    # Main diagonal: coefficient of C₀
-    c[0] = -lam         # Upper diagonal: coefficient of C₁
-
+    # At x=0, we have a flux boundary condition (species consumed/produced)
+    # The flux term is added to the RHS in build_rhs()
+    # LHS coefficients for equation: (1+λ)C₀ⁿ⁺¹ - λC₁ⁿ⁺¹ = RHS₀
+    b[0] = 1.0 + lam    # Coefficient of C₀ (main diagonal)
+    c[0] = -lam         # Coefficient of C₁ (upper diagonal)
+    
     # -------------------------------------------------------------------------
-    # ROWS 1 to Nx-2: Interior points
+    # ROWS 1 to Nx-2: Interior points (standard Crank-Nicolson)
     # -------------------------------------------------------------------------
-    # Standard Crank-Nicolson discretization:
-    # -λ/2·Cᵢ₋₁ + (1+λ)·Cᵢ - λ/2·Cᵢ₊₁ = RHS
-    for r in range(1, n - 1):
-        a[r - 1] = -0.5 * lam   # Lower diagonal: coefficient of Cᵢ₋₁
-        b[r] = 1.0 + lam        # Main diagonal: coefficient of Cᵢ
-        if r <= n - 2:
-            c[r] = -0.5 * lam if r < n - 1 else 0.0  # Upper diagonal: coefficient of Cᵢ₊₁
-
+    # Equation: -λ/2·Cᵢ₋₁ + (1+λ)·Cᵢ - λ/2·Cᵢ₊₁ = RHS
+    # Using vectorized assignment for efficiency
+    a[0:Nx-2] = -0.5 * lam    # Coefficient of Cᵢ₋₁
+    b[1:Nx-1] = 1.0 + lam     # Coefficient of Cᵢ
+    c[1:Nx-1] = -0.5 * lam    # Coefficient of Cᵢ₊₁
+    
     # -------------------------------------------------------------------------
-    # ROW Nx-1: Bulk boundary (x = L)
+    # ROW Nx-1: Bulk boundary condition (Neumann: zero gradient)
     # -------------------------------------------------------------------------
-    # Neumann BC: ∂C/∂x = 0 at x = L
-    # Discretized as: Cₙₓ₋₁ = Cₙₓ₋₂
+    # Physical meaning: Far from electrode, concentration gradient is zero
+    # Mathematical form: ∂C/∂x|ₓ₌ₗ = 0
+    # Discretized: (Cₙₓ₋₁ - Cₙₓ₋₂)/Δx = 0  →  Cₙₓ₋₁ = Cₙₓ₋₂
     # Rearranged: -Cₙₓ₋₂ + Cₙₓ₋₁ = 0
-    a[n - 2] = -1.0   # Coefficient of Cₙₓ₋₂
-    b[n - 1] = 1.0    # Coefficient of Cₙₓ₋₁
-
+    a[Nx-2] = -1.0    # Coefficient of Cₙₓ₋₂
+    b[Nx-1] = 1.0     # Coefficient of Cₙₓ₋₁
+    
     return a, b, c
 
 
-def cn_rhs_with_flux_neumann_right(
-    C_old: np.ndarray,
-    lam: float,
-    dt: float,
-    dx: float,
-    J_new: float,
-    J_prev: float,
-) -> np.ndarray:
+# =============================================================================
+# RIGHT-HAND SIDE (RHS) BUILDER WITH FLUX BOUNDARY CONDITION
+# =============================================================================
+
+def build_rhs(C_old, lam, dt, dx, J_new, J_prev):
     """
-    Build the RIGHT-HAND SIDE (RHS) vector for Crank-Nicolson scheme.
+    Build the RIGHT-HAND SIDE (RHS) vector for the Crank-Nicolson system.
     
-    WHAT THIS COMPUTES:
-    ===================
-        The RHS of:  A · Cⁿ⁺¹ = RHS
+    THE LINEAR SYSTEM:
+    ==================
+        We solve: A · Cⁿ⁺¹ = RHS
         
-        RHS contains:
-        - Contributions from old time step concentrations (known)
-        - Flux boundary condition at electrode surface
+        Where:
+        - A is the LHS matrix (built by build_cn_matrices)
+        - Cⁿ⁺¹ is the unknown concentration at new time step
+        - RHS contains known values from old time step + boundary conditions
     
-    THE FLUX BOUNDARY CONDITION (Key concept!):
-    ===========================================
-        At the electrode (x=0), species are consumed/produced by the reaction.
+    FLUX BOUNDARY CONDITION AT ELECTRODE:
+    =====================================
+        At x=0, species are consumed or produced by the electrochemical reaction.
         
-        Fick's first law: J = -D · ∂C/∂x|ₓ₌₀
+        Fick's First Law relates flux to concentration gradient:
+            J = -D · ∂C/∂x|ₓ₌₀
         
         Where J is the molar flux [mol/(cm²·s)]:
-        - J > 0: Species flowing INTO the electrode (being consumed)
-        - J < 0: Species flowing OUT of the electrode (being produced)
+        - J > 0: Species flowing INTO solution (being produced)
+        - J < 0: Species flowing OUT of solution (being consumed)
         
-        Using a ghost node approach and Crank-Nicolson averaging:
+        Using a "ghost node" approach to handle this flux BC:
         
-        RHS₀ = (1-λ)·C₀ⁿ + λ·C₁ⁿ + (Δt/Δx)·(Jⁿ⁺¹ + Jⁿ)
-                └──── diffusion ────┘   └─── flux term ───┘
+            C₋₁ = C₀ + J·Δx/D
+            
+        Substituting into the Crank-Nicolson equation and simplifying,
+        the flux contribution appears as an additional term in RHS₀:
         
-        The flux term adds/removes material at the surface based on
-        the electrochemical reaction rate.
+            RHS₀ = (1-λ)·C₀ⁿ + λ·C₁ⁿ + (Δt/Δx)·(Jⁿ⁺¹ + Jⁿ)
+            
+        The (Δt/Δx)·(J_new + J_prev) term is the Crank-Nicolson average
+        of the flux at old and new time steps.
+    
+    INTERIOR POINTS:
+    ================
+        For i = 1, 2, ..., Nx-2:
+        
+            RHSᵢ = λ/2·Cⁿᵢ₋₁ + (1-λ)·Cⁿᵢ + λ/2·Cⁿᵢ₊₁
+        
+        This is the explicit part of Crank-Nicolson (known from old time step).
+    
+    BULK BOUNDARY:
+    ==============
+        For i = Nx-1 (Neumann BC: Cₙₓ₋₁ = Cₙₓ₋₂):
+        
+            RHSₙₓ₋₁ = 0
+        
+        Combined with LHS row [-1, 1], this gives Cₙₓ₋₁ = Cₙₓ₋₂.
     
     Parameters:
-        C_old: Concentration array at previous time step (length Nx)
-        lam: λ = D·Δt/Δx² (diffusion number)
-        dt: Time step [s]
-        dx: Spatial step [cm]
-        J_new: Molar flux at new time step [mol/(cm²·s)]
-        J_prev: Molar flux at previous time step [mol/(cm²·s)]
+    -----------
+        C_old : np.ndarray
+            Concentration array at previous time step [mol/cm³]
+        lam : float
+            Diffusion number λ = D·Δt/Δx²
+        dt : float
+            Time step [s]
+        dx : float
+            Spatial grid spacing [cm]
+        J_new : float
+            Molar flux at new time step [mol/(cm²·s)]
+        J_prev : float
+            Molar flux at previous time step [mol/(cm²·s)]
     
     Returns:
-        rhs: Right-hand side vector (length Nx)
+    --------
+        rhs : np.ndarray
+            Right-hand side vector (length Nx)
     """
-    Nx = C_old.size
-    rhs = np.empty(Nx, dtype=float)
-
+    Nx = len(C_old)
+    rhs = np.empty(Nx)  # Pre-allocate (faster than np.zeros for large arrays)
+    
     # -------------------------------------------------------------------------
     # ROW 0: Electrode surface with flux BC
     # -------------------------------------------------------------------------
-    # RHS = (diffusion from old time step) + (flux contribution)
-    # 
-    # The flux term (dt/dx)·(J_new + J_prev) represents:
-    # - Crank-Nicolson averaging of flux over old and new time
-    # - Converts flux [mol/(cm²·s)] to concentration change [mol/cm³]
+    # RHS₀ = (diffusion terms from old time step) + (flux contribution)
+    #
+    # Flux term explanation:
+    #   (dt/dx) converts flux [mol/(cm²·s)] to concentration change [mol/cm³]
+    #   (J_new + J_prev) is Crank-Nicolson averaging over old and new time
     #
     # Physical meaning:
-    # - If J > 0: Reaction consumes species → concentration decreases
-    # - If J < 0: Reaction produces species → concentration increases
+    #   - If J > 0: Species is being added → concentration increases
+    #   - If J < 0: Species is being removed → concentration decreases
     rhs[0] = (1.0 - lam) * C_old[0] + lam * C_old[1] + (dt / dx) * (J_new + J_prev)
-
+    
     # -------------------------------------------------------------------------
-    # ROWS 1 to Nx-2: Interior points (standard diffusion)
+    # ROWS 1 to Nx-2: Interior points (VECTORIZED for speed!)
     # -------------------------------------------------------------------------
-    # No flux here, just diffusion from neighboring points
-    # RHS = λ/2·Cᵢ₋₁ⁿ + (1-λ)·Cᵢⁿ + λ/2·Cᵢ₊₁ⁿ
-    for r in range(1, Nx - 1):
-        rhs[r] = (1.0 - lam) * C_old[r] + 0.5 * lam * (C_old[r - 1] + C_old[r + 1])
-
+    # Standard Crank-Nicolson RHS: weighted average of neighbors
+    # RHSᵢ = λ/2·Cᵢ₋₁ + (1-λ)·Cᵢ + λ/2·Cᵢ₊₁
+    #
+    # This is ~10x faster than a Python for-loop!
+    rhs[1:Nx-1] = ((1.0 - lam) * C_old[1:Nx-1] + 
+                   0.5 * lam * (C_old[0:Nx-2] + C_old[2:Nx]))
+    
     # -------------------------------------------------------------------------
-    # ROW Nx-1: Bulk boundary (Neumann BC: zero gradient)
+    # ROW Nx-1: Bulk boundary (Neumann BC)
     # -------------------------------------------------------------------------
-    # Equation is: Cₙₓ₋₁ - Cₙₓ₋₂ = 0, so RHS = 0
-    rhs[Nx - 1] = 0.0
+    # Equation is: -Cₙₓ₋₂ + Cₙₓ₋₁ = 0, so RHS = 0
+    rhs[Nx-1] = 0.0
     
     return rhs
 
 
 # =============================================================================
-# MAIN CV SIMULATION FUNCTION
+# MAIN SIMULATION FUNCTION
 # =============================================================================
 
-def simulate_cv_multicycle(
-    *,
-    E0=0.0,           # Formal potential [V] - where reaction is at equilibrium
+def simulate_cv_stable(
+    *,  # Force keyword arguments (prevents positional argument errors)
+    # -------------------------------------------------------------------------
+    # ELECTROCHEMICAL PARAMETERS
+    # -------------------------------------------------------------------------
+    E0=0.0,           # Formal potential [V]
+                      # The equilibrium potential of the redox couple
+                      # At E = E0, forward and reverse rates are equal (for equal conc.)
+    
     E_start=-0.25,    # Starting potential [V]
-    E_switch=0.25,    # Switching (vertex) potential [V]
+                      # Where the potential sweep begins
+                      # Typically 100-300 mV negative of E0 for oxidative-first scan
+    
+    E_switch=0.25,    # Switching potential [V] (vertex)
+                      # Where the sweep direction reverses
+                      # Typically 100-300 mV positive of E0
+    
     v=0.2,            # Scan rate [V/s]
+                      # How fast the potential changes
+                      # Typical range: 0.01 - 10 V/s
+                      # Faster scan → larger peaks but more kinetic limitations
+    
     n_electrons=1,    # Number of electrons transferred
-    T=298.15,         # Temperature [K] (298.15 K = 25°C)
+                      # For O + n·e⁻ ⇌ R
+                      # Affects peak separation: ΔEp = 59/n mV for reversible
+    
+    T=298.15,         # Temperature [K]
+                      # 298.15 K = 25°C (standard conditions)
+                      # Affects β = nF/RT and diffusion
+    
     alpha=0.5,        # Transfer coefficient (symmetry factor)
+                      # Fraction of applied potential that accelerates reduction
+                      # α = 0.5 means symmetric energy barrier
+                      # Typical range: 0.3 - 0.7
+    
     k0=0.2,           # Standard rate constant [cm/s]
+                      # How fast electron transfer occurs at E = E0
+                      # k0 > 0.1: Fast/reversible kinetics
+                      # k0 = 0.001-0.1: Quasi-reversible
+                      # k0 < 0.001: Slow/irreversible
+    
+    # -------------------------------------------------------------------------
+    # SPECIES PROPERTIES
+    # -------------------------------------------------------------------------
     DO=7e-6,          # Diffusion coefficient of O [cm²/s]
+                      # How fast oxidized species moves through solution
+                      # Typical values: 10⁻⁶ to 10⁻⁵ cm²/s
+    
     DR=7e-6,          # Diffusion coefficient of R [cm²/s]
+                      # How fast reduced species moves through solution
+                      # Often assumed equal to DO (symmetric diffusion)
+    
     C_total=1e-6,     # Total concentration [mol/cm³]
+                      # = 1 mM (millimolar)
+                      # Initial condition: all R, no O
+    
+    # -------------------------------------------------------------------------
+    # ELECTRODE PROPERTIES
+    # -------------------------------------------------------------------------
     A=0.071,          # Electrode area [cm²]
+                      # Current i = j × A (current density × area)
+    
     L=0.10,           # Domain length [cm]
+                      # Distance from electrode to bulk boundary
+                      # Must be >> diffusion layer thickness δ ≈ √(D·t)
+    
+    # -------------------------------------------------------------------------
+    # NUMERICAL PARAMETERS
+    # -------------------------------------------------------------------------
     Nx=301,           # Number of spatial grid points
-    dt=5e-4,          # Time step [s]
-    n_cycles=3,       # Number of CV cycles to simulate
+                      # More points → better accuracy but slower
+                      # Rule: Need ~10-20 points in diffusion layer
+                      # δ/dx ≈ √(D·t_total) / (L/Nx) should be > 10
+    
+    dt=2e-4,          # Time step [s]
+                      # Smaller → more accurate but slower
+                      # Check: λ = D·dt/dx² should be < 1 for accuracy
+    
+    n_cycles=3,       # Number of CV cycles
+                      # Cycle 1: |ipa/ipc| > 1 (asymmetric)
+                      # Cycles 2-3: Approaches |ipa/ipc| ≈ 1 (steady state)
+    
     picard_max=50,    # Maximum Picard iterations per time step
-    relax0=0.08,      # Initial relaxation factor for Picard iteration
-    exp_clamp=50.0,   # Clamp value for exponentials
-    tol_j=1e-10,      # Convergence tolerance for current density
-    tol_c0=1e-12,     # Convergence tolerance for surface concentration
-    J_cap_factor=50.0,  # Factor for capping maximum flux
-) -> dict:
+                      # Usually converges in 10-30 iterations
+                      # Set higher for safety
+    
+    relax=0.08,       # Relaxation factor for Picard iteration
+                      # j_new = relax × j_BV + (1-relax) × j_old
+                      # 
+                      # KEY STABILITY PARAMETER!
+                      # - relax = 1.0: No relaxation, may oscillate
+                      # - relax = 0.1: Conservative, stable
+                      # - relax = 0.05-0.10: Recommended range
+    
+    tol=1e-10,        # Convergence tolerance for Picard iteration
+                      # Stop when |j_new - j_old| < tol
+):
     """
     Simulate cyclic voltammetry for a two-species redox system.
     
-    PHYSICAL SYSTEM:
-    ================
-        O + n e⁻ ⇌ R
-        
-        - O: Oxidized species (electron acceptor)
-        - R: Reduced species (electron donor)
-        - n: Number of electrons transferred
-    
     WHAT THIS FUNCTION DOES:
     ========================
-        1. Sets up spatial grid and initial conditions
-        2. Time-steps through the potential sweep
-        3. At each time step:
-           a. Compute potential E(t) from triangular waveform
-           b. Use Picard iteration to solve coupled problem:
-              - Butler-Volmer gives current from surface concentrations
-              - Diffusion equation evolves concentrations given flux
+        1. Set up spatial grid and initial conditions
+        2. Build the LHS matrices for Crank-Nicolson (done once)
+        3. Time-step through the potential sweep:
+           a. Calculate E(t) from triangular waveform
+           b. Picard iteration to solve coupled problem:
+              - Butler-Volmer → current from surface concentrations
+              - Diffusion → new concentrations from flux
            c. Store current for output
+        4. Return results organized by cycle
     
     THE BUTLER-VOLMER EQUATION:
     ===========================
         j = nFk₀[Cₒ(0)·exp(-αβη) - Cᵣ(0)·exp((1-α)βη)]
         
-        Where:
-        - j: Current density [A/cm²]
-        - η = E - E⁰: Overpotential [V]
-        - β = nF/RT ≈ 38.9 V⁻¹ at 25°C
-        - α: Transfer coefficient (typically 0.5)
-        - k₀: Standard rate constant [cm/s]
-        - Cₒ(0), Cᵣ(0): Surface concentrations [mol/cm³]
-        
-        Physical meaning:
+        Terms:
         - First term: Reduction rate (O + e⁻ → R)
+          * exp(-αβη) increases when η < 0 (negative potential)
+          * Proportional to Cₒ(0) (need O at surface to reduce)
+          
         - Second term: Oxidation rate (R → O + e⁻)
-        - Net current is the difference
+          * exp((1-α)βη) increases when η > 0 (positive potential)
+          * Proportional to Cᵣ(0) (need R at surface to oxidize)
+        
+        Net current j is the difference between these rates.
     
     PICARD ITERATION (Why needed?):
     ===============================
-        The problem is NONLINEAR because:
-        - Current j depends on surface concentrations Cₒ(0), Cᵣ(0)
-        - Surface concentrations depend on flux J = j/(nF)
-        - Flux affects how diffusion evolves concentrations
-        - It's circular! j ↔ C(0) ↔ J ↔ diffusion ↔ C(0)
+        The problem is NONLINEAR and COUPLED:
         
-        Picard iteration resolves this by:
-        1. Guess a current j
-        2. Compute concentrations from diffusion with that flux
-        3. Compute new current from Butler-Volmer with those concentrations
-        4. Relax: j_new = relax·j_BV + (1-relax)·j_old
-        5. Repeat until converged
+        j depends on ──► C(0) depends on ──► J depends on ──► j
+        (Butler-Volmer)   (diffusion)        (j = nFJ)
         
-        The relaxation factor (0 < relax < 1) prevents oscillation.
-    
-    Parameters:
-        See parameter definitions above
+        This circular dependency is resolved iteratively:
+        1. Guess current j
+        2. Calculate flux J = j/(nF)
+        3. Solve diffusion equation → new C(0)
+        4. Calculate new j from Butler-Volmer with new C(0)
+        5. Relax: j = relax×j_new + (1-relax)×j_old
+        6. Repeat until |j_new - j_old| < tolerance
     
     Returns:
+    --------
         dict containing:
-        - 'E': Potential array [V]
-        - 'i': Current array [A]
-        - 't': Time array [s]
-        - 'cycle_data': List of dicts, one per cycle
-        - 'CO_final': Final O concentration profile [mol/cm³]
-        - 'CR_final': Final R concentration profile [mol/cm³]
+            'E': Full potential array [V]
+            'i': Full current array [A]
+            't': Full time array [s]
+            'cycle_data': List of dicts for each cycle
+            'CO_final': Final O concentration profile [mol/cm³]
+            'CR_final': Final R concentration profile [mol/cm³]
+            'params': Dictionary of parameters used
     """
     
     # =========================================================================
-    # SETUP: Compute derived parameters
+    # DERIVED PARAMETERS
     # =========================================================================
     
-    # β = nF/RT: Appears in Butler-Volmer exponentials
-    # At 25°C: β ≈ 38.9 V⁻¹ for n=1
-    # Physical meaning: How sensitive reaction rate is to potential
+    # β = nF/RT: Exponential sensitivity to potential
+    # At 25°C with n=1: β ≈ 38.9 V⁻¹
+    # Meaning: 25.7 mV change in potential → e-fold change in rate
     beta = n_electrons * F / (R_gas * T)
     
-    # Spatial discretization
-    dx = L / (Nx - 1)  # Grid spacing [cm]
+    # Spatial grid spacing
+    dx = L / (Nx - 1)  # [cm]
     
-    # Diffusion numbers (λ): Key stability parameter
-    # λ = D·Δt/Δx²
-    # Rule of thumb: λ < 1 for stability (CN is stable for any λ, but accuracy suffers if too large)
+    # Diffusion numbers (λ = D·Δt/Δx²)
+    # These determine the "spread" of diffusion per time step
+    # λ < 1 is recommended for good accuracy
     lamO = DO * dt / dx**2  # For oxidized species
     lamR = DR * dt / dx**2  # For reduced species
-
+    
+    # Print stability check
+    print(f"Stability check: λ_O = {lamO:.4f}, λ_R = {lamR:.4f} (should be < 1)")
+    
     # =========================================================================
-    # SETUP: Time and potential arrays
+    # TIME AND POTENTIAL ARRAYS
     # =========================================================================
     
     # Calculate cycle timing
     t_half = abs(E_switch - E_start) / v  # Time for half cycle [s]
-    t_cycle = 2.0 * t_half                 # Time for full cycle [s]
+    t_cycle = 2.0 * t_half                 # Time for complete cycle [s]
     t_total = n_cycles * t_cycle           # Total simulation time [s]
     
-    # Create time array
+    # Create time array (from 0 to t_total with step dt)
     t = np.arange(0.0, t_total + dt, dt)
     
-    # Generate triangular potential waveform E(t)
-    E = triangular_potential_multicycle(t, E_start, E_switch, v, n_cycles)
-
+    # Generate triangular potential waveform
+    E = triangular_potential(t, E_start, E_switch, v)
+    
+    n_steps = len(t)
+    print(f"Time steps: {n_steps:,}")
+    print(f"Grid points: {Nx}")
+    
     # =========================================================================
-    # SETUP: Initial conditions
+    # INITIAL CONDITIONS
     # =========================================================================
     
     # Start with only reduced species (R) present
-    # This is typical: you start with your analyte in reduced form
-    CO = np.full(Nx, 0.0, dtype=float)        # [O] = 0 everywhere
-    CR = np.full(Nx, C_total, dtype=float)    # [R] = C_total everywhere
-
-    # =========================================================================
-    # SETUP: Build Crank-Nicolson LHS matrices
-    # =========================================================================
-    # These don't change during simulation, so build once
+    # This is the typical experimental condition:
+    # - Add your reduced analyte to solution
+    # - Scan positive to oxidize it first
+    CO = np.zeros(Nx)                  # [O] = 0 everywhere initially
+    CR = np.full(Nx, C_total)          # [R] = C_total everywhere initially
     
-    aLO, bLO, cLO = build_cn_lhs_neumann_right(Nx, lamO)  # For O diffusion
-    aLR, bLR, cLR = build_cn_lhs_neumann_right(Nx, lamR)  # For R diffusion
-
     # =========================================================================
-    # SETUP: Initialize storage and variables
+    # BUILD LHS MATRICES (done once, reused every time step)
     # =========================================================================
     
-    i = np.zeros_like(t, dtype=float)  # Current array [A]
-    j = 0.0  # Current density [A/cm²], starts at zero
+    aO, bO, cO = build_cn_matrices(Nx, lamO)  # For O diffusion equation
+    aR, bR, cR = build_cn_matrices(Nx, lamR)  # For R diffusion equation
     
-    # Fluxes from previous time step (for Crank-Nicolson averaging)
-    JO_prev = 0.0  # Flux of O at previous time step [mol/(cm²·s)]
-    JR_prev = 0.0  # Flux of R at previous time step [mol/(cm²·s)]
-
     # =========================================================================
-    # SETUP: Safety limits for numerical stability
+    # INITIALIZE OUTPUT AND STATE VARIABLES
     # =========================================================================
     
-    # Maximum expected flux (for capping unrealistic values)
-    J_scale = max(DR * C_total / dx, 1e-30)
-    J_cap = J_cap_factor * J_scale
-    j_cap = n_electrons * F * J_cap  # Convert to current density
-
+    i_out = np.zeros(n_steps)  # Current array [A]
+    
+    j = 0.0          # Current density [A/cm²]
+    JO_prev = 0.0    # O flux at previous time step [mol/(cm²·s)]
+    JR_prev = 0.0    # R flux at previous time step [mol/(cm²·s)]
+    
+    # Flux cap for stability (prevent unrealistic values)
+    J_cap = 50.0 * DR * C_total / dx
+    j_cap = n_electrons * F * J_cap
+    
+    # Progress tracking
+    print_interval = n_steps // 10  # Print every 10%
+    t_start = perf_counter()
+    
     # =========================================================================
     # MAIN TIME LOOP
     # =========================================================================
     
-    for k in range(t.size):
-        # Current potential and overpotential
-        eta = E[k] - E0  # Overpotential: driving force for reaction
+    for k in range(n_steps):
         
-        # Save old values for Picard iteration
+        # ---------------------------------------------------------------------
+        # Progress indicator (every 10%)
+        # ---------------------------------------------------------------------
+        if k > 0 and k % print_interval == 0:
+            elapsed = perf_counter() - t_start
+            pct = 100 * k / n_steps
+            remaining = elapsed / k * (n_steps - k)
+            print(f"  {pct:.0f}% complete, ~{remaining:.0f}s remaining...")
+        
+        # ---------------------------------------------------------------------
+        # Calculate overpotential
+        # ---------------------------------------------------------------------
+        # η = E - E⁰ is the driving force for the reaction
+        # η > 0: Favors oxidation (R → O + e⁻)
+        # η < 0: Favors reduction (O + e⁻ → R)
+        eta = E[k] - E0
+        
+        # ---------------------------------------------------------------------
+        # Save old state for Picard iteration
+        # ---------------------------------------------------------------------
         CO_old = CO.copy()
         CR_old = CR.copy()
         j_old = j
         
-        # Surface concentrations for convergence check
-        cO0_old = CO[0]
-        cR0_old = CR[0]
+        # ---------------------------------------------------------------------
+        # Pre-compute exponential factors (constant for this time step)
+        # ---------------------------------------------------------------------
+        # These appear in Butler-Volmer equation:
+        #   j = nFk₀[Cₒ·ef - Cᵣ·er]
+        #
+        # ef = exp(-αβη): Reduction rate factor
+        #   - η > 0 → ef small (reduction suppressed at positive potential)
+        #   - η < 0 → ef large (reduction enhanced at negative potential)
+        #
+        # er = exp((1-α)βη): Oxidation rate factor
+        #   - η > 0 → er large (oxidation enhanced at positive potential)
+        #   - η < 0 → er small (oxidation suppressed at negative potential)
+        #
+        # Clipping prevents overflow: exp(50) ≈ 5×10²¹ (still finite)
+        ef = np.exp(np.clip(-alpha * beta * eta, -50, 50))
+        er = np.exp(np.clip((1.0 - alpha) * beta * eta, -50, 50))
         
-        # Reset relaxation factor for this time step
-        relax = relax0
-
         # =====================================================================
-        # PICARD ITERATION: Solve nonlinear coupled problem
+        # PICARD ITERATION
         # =====================================================================
+        # Iteratively solve the coupled nonlinear problem
         
         for it in range(picard_max):
-            # -----------------------------------------------------------------
-            # Step 1: Get current surface concentrations
-            # -----------------------------------------------------------------
-            CO0 = max(finite_scalar(float(CO[0]), 0.0), 0.0)  # [O] at electrode
-            CR0 = max(finite_scalar(float(CR[0]), 0.0), 0.0)  # [R] at electrode
-
-            # -----------------------------------------------------------------
-            # Step 2: Compute Butler-Volmer current density
-            # -----------------------------------------------------------------
-            # j = nFk₀[Cₒ·exp(-αβη) - Cᵣ·exp((1-α)βη)]
-            #
-            # exp(-αβη): Forward (reduction) rate factor
-            #   - η > 0 (positive potential): This term decreases → less reduction
-            #   - η < 0 (negative potential): This term increases → more reduction
-            #
-            # exp((1-α)βη): Reverse (oxidation) rate factor
-            #   - η > 0: This term increases → more oxidation
-            #   - η < 0: This term decreases → less oxidation
             
-            ef = safe_exp(-alpha * beta * eta, clamp=exp_clamp)        # Reduction factor
-            er = safe_exp((1.0 - alpha) * beta * eta, clamp=exp_clamp) # Oxidation factor
+            # -----------------------------------------------------------------
+            # Step 1: Get surface concentrations (ensure non-negative)
+            # -----------------------------------------------------------------
+            CO0 = max(CO[0], 0.0)  # [O] at electrode surface
+            CR0 = max(CR[0], 0.0)  # [R] at electrode surface
             
-            # Butler-Volmer current density
+            # -----------------------------------------------------------------
+            # Step 2: Calculate Butler-Volmer current density
+            # -----------------------------------------------------------------
+            # j = nFk₀[Cₒ(0)·exp(-αβη) - Cᵣ(0)·exp((1-α)βη)]
+            #       └── reduction term ──┘   └── oxidation term ──┘
+            #
+            # Sign convention:
+            # - j > 0: Net reduction (O being consumed)
+            # - j < 0: Net oxidation (R being consumed)
             j_bv = n_electrons * F * k0 * (CO0 * ef - CR0 * er)
-            j_bv = finite_scalar(j_bv, 0.0)  # Handle any NaN/Inf
-
+            
             # -----------------------------------------------------------------
-            # Step 3: Relaxation to ensure convergence
+            # Step 3: Relaxation (KEY FOR STABILITY!)
             # -----------------------------------------------------------------
-            # Instead of jumping directly to j_bv, we move gradually:
-            # j_new = relax·j_bv + (1-relax)·j_old
+            # Instead of jumping directly to j_bv, we blend with old value:
+            #   j_new = relax × j_bv + (1 - relax) × j_old
             #
-            # If relax = 1: No relaxation, might oscillate
-            # If relax = 0.1: Slow but stable convergence
-            
+            # This prevents oscillation when the system is stiff
+            # (i.e., when small changes in C cause large changes in j)
             j_new = relax * j_bv + (1.0 - relax) * j_old
-            j_new = finite_scalar(j_new, 0.0)
-            j_new = clamp_scalar(j_new, -j_cap, +j_cap)  # Safety clamp
-
-            # -----------------------------------------------------------------
-            # Step 4: Convert current density to molar flux
-            # -----------------------------------------------------------------
-            # j = nF·J  →  J = j/(nF)
-            # 
-            # Flux direction convention:
-            # - j > 0: Net reduction (O being consumed at surface)
-            # - JO = -J: O flux is negative (O flowing toward electrode to be reduced)
-            # - JR = +J: R flux is positive (R flowing away from electrode after being produced)
             
-            J = j_new / (n_electrons * F)  # Molar flux [mol/(cm²·s)]
+            # Clamp to prevent runaway (safety measure)
+            j_new = np.clip(j_new, -j_cap, j_cap)
             
-            JO_new = -J  # O is consumed when j > 0 (reduction)
-            JR_new = +J  # R is produced when j > 0 (reduction)
-
             # -----------------------------------------------------------------
-            # Step 5: Solve diffusion equations with new fluxes
+            # Step 4: Convert current density to molar fluxes
+            # -----------------------------------------------------------------
+            # j = nF × J, where J is molar flux [mol/(cm²·s)]
+            J = j_new / (n_electrons * F)
+            
+            # Flux direction convention (for O + ne⁻ → R):
+            # - When j > 0 (reduction): O is consumed, R is produced
+            #   * JO < 0 (O flows toward electrode to be consumed)
+            #   * JR > 0 (R flows away from electrode after production)
+            # - When j < 0 (oxidation): R is consumed, O is produced
+            #   * JO > 0 (O flows away after production)
+            #   * JR < 0 (R flows toward electrode to be consumed)
+            JO_new = -J  # O flux (negative of net reaction flux)
+            JR_new = +J  # R flux (positive of net reaction flux)
+            
+            # -----------------------------------------------------------------
+            # Step 5: Build RHS and solve diffusion equations
             # -----------------------------------------------------------------
             # Build RHS vectors with flux boundary conditions
-            rhsO = cn_rhs_with_flux_neumann_right(CO_old, lamO, dt, dx, JO_new, JO_prev)
-            rhsR = cn_rhs_with_flux_neumann_right(CR_old, lamR, dt, dx, JR_new, JR_prev)
-
-            # Solve tridiagonal systems: A·C_new = RHS
-            try:
-                # Note: We copy the LHS arrays because thomas_solve_inplace modifies them
-                solO = thomas_solve_inplace(aLO.copy(), bLO.copy(), cLO.copy(), rhsO)
-                solR = thomas_solve_inplace(aLR.copy(), bLR.copy(), cLR.copy(), rhsR)
-            except FloatingPointError:
-                # If solver fails, reduce relaxation and retry
-                relax *= 0.5
-                CO = CO_old.copy()
-                CR = CR_old.copy()
-                j_old *= 0.5
-                if relax < 1e-6:
-                    break  # Give up if relaxation is too small
-                continue
-
-            # Enforce non-negative concentrations (physically required)
-            CO_new = np.clip(solO, 0.0, np.inf)
-            CR_new = np.clip(solR, 0.0, np.inf)
-
+            rhsO = build_rhs(CO_old, lamO, dt, dx, JO_new, JO_prev)
+            rhsR = build_rhs(CR_old, lamR, dt, dx, JR_new, JR_prev)
+            
+            # Solve tridiagonal systems: A × C_new = RHS
+            CO_new = thomas_solve(aO, bO, cO, rhsO)
+            CR_new = thomas_solve(aR, bR, cR, rhsR)
+            
+            # Enforce non-negative concentrations (physical requirement)
+            np.maximum(CO_new, 0.0, out=CO_new)
+            np.maximum(CR_new, 0.0, out=CR_new)
+            
             # -----------------------------------------------------------------
             # Step 6: Check convergence
             # -----------------------------------------------------------------
-            dj = abs(j_new - j_old)                                    # Change in current
-            dc0 = max(abs(CO_new[0] - cO0_old), abs(CR_new[0] - cR0_old))  # Change in surface conc
-
+            dj = abs(j_new - j_old)  # Change in current density
+            
             # Update for next iteration
-            CO, CR = CO_new, CR_new
+            CO = CO_new
+            CR = CR_new
             j_old = j_new
-            cO0_old, cR0_old = CO_new[0], CR_new[0]
-
-            # Converged if both current and concentration changes are small
-            if dj < tol_j and dc0 < tol_c0:
+            
+            # Converged if current change is below tolerance
+            if dj < tol:
                 break
         
         # =====================================================================
         # END PICARD ITERATION: Store results
         # =====================================================================
         
-        # Final values for this time step
-        j = j_old
-        J = j / (n_electrons * F)
-        JO_prev = -J  # Save for next time step's Crank-Nicolson averaging
-        JR_prev = +J
-
-        # Convert current density to current
+        # Save final values
+        j = j_new
+        
+        # Update flux history for next time step's Crank-Nicolson averaging
+        JO_prev = -j / (n_electrons * F)
+        JR_prev = +j / (n_electrons * F)
+        
+        # Calculate current from current density
         # Sign convention: i = -j × A
-        # - j > 0 means reduction (O + e⁻ → R), which is cathodic
-        # - But Ossila convention: cathodic = negative current
-        # - So we negate to match convention
-        i[k] = -j * A
-
+        # - This converts from our internal convention (j > 0 for reduction)
+        # - To Ossila convention (reduction = negative current)
+        i_out[k] = -j * A
+    
     # =========================================================================
-    # POST-PROCESSING: Split into individual cycles
+    # TIMING REPORT
+    # =========================================================================
+    elapsed = perf_counter() - t_start
+    print(f"Completed in {elapsed:.1f} seconds")
+    
+    # =========================================================================
+    # SPLIT RESULTS INTO INDIVIDUAL CYCLES
     # =========================================================================
     
     points_per_cycle = int(t_cycle / dt)
     cycle_data = []
+    
     for cyc in range(n_cycles):
         start_idx = cyc * points_per_cycle
         end_idx = min((cyc + 1) * points_per_cycle, len(t))
+        
         cycle_data.append({
-            'E': E[start_idx:end_idx],
-            'i': i[start_idx:end_idx],
-            't': t[start_idx:end_idx] - t[start_idx],  # Reset time to 0 for each cycle
-            'cycle_num': cyc + 1
+            'E': E[start_idx:end_idx],           # Potential for this cycle
+            'i': i_out[start_idx:end_idx],       # Current for this cycle
+            't': t[start_idx:end_idx] - t[start_idx],  # Time (reset to 0)
+            'cycle_num': cyc + 1                 # Cycle number (1-indexed)
         })
-
+    
     # =========================================================================
     # RETURN RESULTS
     # =========================================================================
     
     return {
-        'E': E,            # Full potential array [V]
-        'i': i,            # Full current array [A]
-        't': t,            # Full time array [s]
+        'E': E,                  # Full potential array [V]
+        'i': i_out,              # Full current array [A]
+        't': t,                  # Full time array [s]
         'cycle_data': cycle_data,  # Per-cycle data
-        'CO_final': CO,    # Final O concentration profile [mol/cm³]
-        'CR_final': CR,    # Final R concentration profile [mol/cm³]
+        'CO_final': CO,          # Final O concentration profile [mol/cm³]
+        'CR_final': CR,          # Final R concentration profile [mol/cm³]
         'params': {
             'E_start': E_start,
             'E_switch': E_switch,
@@ -821,69 +926,83 @@ def simulate_cv_multicycle(
 # PEAK ANALYSIS FUNCTION
 # =============================================================================
 
-def analyze_cycle_peaks(E: np.ndarray, i: np.ndarray, E_start: float, E_switch: float) -> dict:
+def analyze_peaks(E, i, E_start, E_switch):
     """
-    Analyze CV peaks for a single cycle.
+    Analyze the peaks in a cyclic voltammogram.
     
     WHAT THIS FINDS:
     ================
         - Anodic peak (ipa, Epa): Maximum positive current (oxidation)
         - Cathodic peak (ipc, Epc): Maximum negative current (reduction)
-        - Peak separation ΔEp = |Epa - Epc|
-        - Peak ratio |ipa/ipc|
+        - Peak separation: ΔEp = |Epa - Epc|
+        - Peak ratio: |ipa/ipc|
     
-    WHY THESE MATTER:
-    =================
-        For a reversible system:
-        - ΔEp = 59/n mV at 25°C (diagnostic for reversibility)
-        - |ipa/ipc| = 1.0 (indicates chemical reversibility)
+    DIAGNOSTIC CRITERIA:
+    ====================
+        For a REVERSIBLE system (fast kinetics):
+        - ΔEp = 59/n mV at 25°C (where n = electrons transferred)
+        - |ipa/ipc| = 1.0 (at steady state)
         
-        Deviations indicate:
-        - Larger ΔEp: Slower kinetics (quasi-reversible or irreversible)
-        - |ipa/ipc| ≠ 1: Chemical reactions, adsorption, or asymmetric diffusion
+        For QUASI-REVERSIBLE system:
+        - 59/n mV < ΔEp < 200 mV
+        - |ipa/ipc| ≈ 1.0
+        
+        For IRREVERSIBLE system:
+        - ΔEp > 200 mV (or only one peak visible)
+        
+        |ipa/ipc| ≠ 1 indicates:
+        - First cycle: Normal (asymmetric starting conditions)
+        - Steady state: Chemical reactions, adsorption, unequal diffusion
     
     Parameters:
-        E: Potential array for one cycle [V]
-        i: Current array for one cycle [A]
-        E_start: Starting potential [V]
-        E_switch: Switching potential [V]
+    -----------
+        E : np.ndarray
+            Potential array for one cycle [V]
+        i : np.ndarray
+            Current array for one cycle [A]
+        E_start : float
+            Starting potential [V]
+        E_switch : float
+            Switching potential [V]
     
     Returns:
-        dict with: E_pc, i_pc, E_pa, i_pa, delta_Ep, ratio, i_min, i_max
+    --------
+        dict with:
+            'E_pa': Anodic peak potential [V]
+            'i_pa': Anodic peak current [A]
+            'E_pc': Cathodic peak potential [V]
+            'i_pc': Cathodic peak current [A]
+            'delta_Ep': Peak separation [V]
+            'ratio': |ipa/ipc| (dimensionless)
     """
-    # Find the switching point (where potential reverses)
+    # Find the switching point (where potential reaches its extreme)
     if E_switch > E_start:
-        k_switch = int(np.argmax(E))  # Switch at maximum E
+        k_switch = np.argmax(E)  # Switching at maximum E
     else:
-        k_switch = int(np.argmin(E))  # Switch at minimum E
+        k_switch = np.argmin(E)  # Switching at minimum E
     
+    # Ensure k_switch is within valid range
     k_switch = max(1, min(k_switch, len(E) - 2))
-
-    # Split into forward and reverse scans
-    E_fwd = E[:k_switch + 1]
-    i_fwd = i[:k_switch + 1]
-    E_rev = E[k_switch:]
-    i_rev = i[k_switch:]
-
-    # Find peaks
-    # Forward scan (oxidative): Find maximum current (anodic peak)
-    idx_pa = int(np.argmax(i_fwd))
-    # Reverse scan (reductive): Find minimum current (cathodic peak)
-    idx_pc = int(np.argmin(i_rev))
-
+    
+    # Anodic peak: Maximum current in forward scan
+    # (Forward scan is from start to switch)
+    idx_pa = np.argmax(i[:k_switch+1])
+    
+    # Cathodic peak: Minimum current in reverse scan
+    # (Reverse scan is from switch to end)
+    idx_pc = np.argmin(i[k_switch:]) + k_switch
+    
     # Extract peak values
-    E_pc, i_pc = float(E_rev[idx_pc]), float(i_rev[idx_pc])
-    E_pa, i_pa = float(E_fwd[idx_pa]), float(i_fwd[idx_pa])
-
+    E_pa, i_pa = E[idx_pa], i[idx_pa]
+    E_pc, i_pc = E[idx_pc], i[idx_pc]
+    
     return {
-        "E_pc": E_pc,      # Cathodic peak potential [V]
-        "i_pc": i_pc,      # Cathodic peak current [A]
-        "E_pa": E_pa,      # Anodic peak potential [V]
-        "i_pa": i_pa,      # Anodic peak current [A]
-        "delta_Ep": abs(E_pa - E_pc),  # Peak separation [V]
-        "ratio": abs(i_pa / i_pc) if i_pc != 0 else np.nan,  # Peak current ratio
-        "i_min": float(np.min(i)),
-        "i_max": float(np.max(i)),
+        'E_pa': E_pa,                    # Anodic peak potential [V]
+        'i_pa': i_pa,                    # Anodic peak current [A]
+        'E_pc': E_pc,                    # Cathodic peak potential [V]
+        'i_pc': i_pc,                    # Cathodic peak current [A]
+        'delta_Ep': abs(E_pa - E_pc),    # Peak separation [V]
+        'ratio': abs(i_pa / i_pc) if i_pc != 0 else np.nan  # Peak ratio
     }
 
 
@@ -891,126 +1010,22 @@ def analyze_cycle_peaks(E: np.ndarray, i: np.ndarray, E_start: float, E_switch: 
 # PLOTTING FUNCTIONS
 # =============================================================================
 
-def plot_potential_waveform(t: np.ndarray, E: np.ndarray, params: dict, save_path: str = None):
+def plot_results(result, save_path=None):
     """
-    Plot the potential waveform E(t) - the triangular wave applied to electrode.
-    
-    This shows the INPUT signal to the electrochemical cell:
-    
-        Potential (V)
-             ^
-        E_switch ──►  /\        /\
-                     /  \      /  \
-                    /    \    /    \
-        E_start ──►/      \  /      \
-                   |       \/        \
-                   +──────────────────────► Time (s)
-                   0     t_cycle   2*t_cycle
+    Plot CV and potential waveform side by side.
     
     Parameters:
-        t: Time array [s]
-        E: Potential array [V]
-        params: Dictionary with E_start, E_switch, v, n_cycles, etc.
-        save_path: If provided, save figure to this path
+    -----------
+        result : dict
+            Output from simulate_cv_stable()
+        save_path : str, optional
+            If provided, save figure to this path
     
     Returns:
-        fig, ax: Matplotlib figure and axis objects
-    """
-    fig, ax = plt.subplots(figsize=(8, 5))
-    
-    # Plot the waveform with green color (like the reference image)
-    ax.plot(t, E, lw=2.5, color='#2E7D32')
-    
-    # Add horizontal dashed lines at E_start and E_switch for reference
-    ax.axhline(y=params['E_start'], color='gray', linestyle='--', linewidth=1, alpha=0.7)
-    ax.axhline(y=params['E_switch'], color='gray', linestyle='--', linewidth=1, alpha=0.7)
-    
-    # Add labels for the potential limits
-    ax.text(t[-1] * 0.02, params['E_start'] - 0.02, f"E_start = {params['E_start']} V", 
-            va='top', fontsize=10, color='gray')
-    ax.text(t[-1] * 0.02, params['E_switch'] + 0.02, f"E_switch = {params['E_switch']} V", 
-            va='bottom', fontsize=10, color='gray')
-    
-    # Labels and title
-    ax.set_xlabel("Time (sec)", fontsize=12)
-    ax.set_ylabel("Potential (V)", fontsize=12)
-    ax.set_title("Potential Waveform", fontsize=14, fontweight='bold')
-    
-    # Add scan rate and cycle info as annotation
-    info_text = f"Scan rate: {params['v']} V/s\nCycles: {params['n_cycles']}"
-    ax.annotate(
-        info_text,
-        xy=(0.98, 0.98), xycoords='axes fraction',
-        fontsize=10, verticalalignment='top', horizontalalignment='right',
-        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8)
-    )
-    
-    ax.grid(True, alpha=0.3)
-    ax.set_xlim(0, t[-1])
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=300)
-        print(f"Potential waveform saved to: {save_path}")
-    
-    return fig, ax
-
-
-def plot_cyclic_voltammogram(E: np.ndarray, i: np.ndarray, params: dict, save_path: str = None):
-    """
-    Plot the cyclic voltammogram (Current vs Potential).
-    
-    This shows the OUTPUT of the electrochemical measurement:
-    
-    Parameters:
-        E: Potential array [V]
-        i: Current array [A]
-        params: Dictionary with E0, etc.
-        save_path: If provided, save figure to this path
-    
-    Returns:
-        fig, ax: Matplotlib figure and axis objects
-    """
-    fig, ax = plt.subplots(figsize=(8, 6))
-    
-    # Convert current to µA for readability
-    i_uA = i * 1e6
-    
-    # Plot the CV curve
-    ax.plot(E, i_uA, lw=2, color='#1a1a1a')
-    
-    # Add zero lines
-    ax.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
-    ax.axvline(x=params.get('E0', 0), color='k', linestyle='--', linewidth=0.5, alpha=0.5)
-    
-    # Labels
-    ax.set_xlabel("Potential (V)", fontsize=12)
-    ax.set_ylabel("Current (µA)", fontsize=12)
-    ax.set_title("Cyclic Voltammogram", fontsize=14, fontweight='bold')
-    
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=300)
-        print(f"CV plot saved to: {save_path}")
-    
-    return fig, ax
-
-
-def plot_cv_and_waveform(result: dict, save_path: str = None):
-    """
-    Plot both CV and potential waveform side by side
-    
-    Parameters:
-        result: Dictionary returned by simulate_cv_multicycle()
-        save_path: If provided, save figure to this path
-    
-    Returns:
-        fig, axes: Matplotlib figure and axes array
+    --------
+        fig, axes : matplotlib figure and axes objects
     """
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    
     params = result['params']
     
     # =========================================================================
@@ -1018,80 +1033,89 @@ def plot_cv_and_waveform(result: dict, save_path: str = None):
     # =========================================================================
     ax1 = axes[0]
     
-    # Use the last cycle (steady state)
-    last_cycle = result['cycle_data'][-1]
-    E_plot = last_cycle['E']
-    i_plot = last_cycle['i'] * 1e6  # Convert A to µA
+    # Use the last cycle (closest to steady state)
+    last = result['cycle_data'][-1]
     
-    # Plot CV curve
-    ax1.plot(E_plot, i_plot, lw=2, color='#1a1a1a')
+    # Plot CV curve (current in µA for readability)
+    ax1.plot(last['E'], last['i'] * 1e6, 'k-', lw=1.5)
     
     # Analyze and mark peaks
-    stats = analyze_cycle_peaks(
-        last_cycle['E'], last_cycle['i'],
-        params['E_start'], params['E_switch']
-    )
+    stats = analyze_peaks(last['E'], last['i'], params['E_start'], params['E_switch'])
     
-    # Mark anodic peak (red dot)
-    ax1.plot(stats['E_pa'], stats['i_pa'] * 1e6, 'o', ms=8, color='#c00000',
+    # Mark anodic peak (red circle)
+    ax1.plot(stats['E_pa'], stats['i_pa'] * 1e6, 'ro', ms=8, 
              label=f"Anodic: {stats['i_pa']*1e6:.1f} µA")
-    # Mark cathodic peak (red dot)
-    ax1.plot(stats['E_pc'], stats['i_pc'] * 1e6, 'o', ms=8, color='#c00000',
+    
+    # Mark cathodic peak (blue circle)
+    ax1.plot(stats['E_pc'], stats['i_pc'] * 1e6, 'bo', ms=8, 
              label=f"Cathodic: {stats['i_pc']*1e6:.1f} µA")
     
-    # Zero reference lines
-    ax1.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
-    ax1.axvline(x=params['E0'], color='k', linestyle='--', linewidth=0.5, alpha=0.5)
+    # Reference lines
+    ax1.axhline(0, color='gray', lw=0.5)               # Zero current line
+    ax1.axvline(params['E0'], color='gray', lw=0.5, ls='--')  # E0 reference
     
-    # Labels
-    ax1.set_xlabel("Potential (V)", fontsize=12)
-    ax1.set_ylabel("Current (µA)", fontsize=12)
-    ax1.set_title("Cyclic Voltammogram", fontsize=14, fontweight='bold')
-    ax1.legend(loc='best', fontsize=9)
+    # Labels and formatting
+    ax1.set_xlabel('Potential (V)', fontsize=12)
+    ax1.set_ylabel('Current (µA)', fontsize=12)
+    ax1.set_title('Cyclic Voltammogram', fontsize=14, fontweight='bold')
+    ax1.legend(loc='best')
     ax1.grid(True, alpha=0.3)
+    
+    # Add peak analysis annotation
+    ax1.annotate(
+        f'ΔEp = {stats["delta_Ep"]*1000:.1f} mV\n|ipa/ipc| = {stats["ratio"]:.3f}',
+        xy=(0.05, 0.95), xycoords='axes fraction',
+        fontsize=10, verticalalignment='top',
+        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8)
+    )
     
     # =========================================================================
     # RIGHT PANEL: Potential Waveform (Potential vs Time)
     # =========================================================================
     ax2 = axes[1]
     
-    # Plot the triangular waveform
-    ax2.plot(result['t'], result['E'], lw=2.5, color='#2E7D32')
+    # Plot triangular waveform
+    ax2.plot(result['t'], result['E'], 'g-', lw=2)
     
     # Reference lines at E_start and E_switch
-    ax2.axhline(y=params['E_start'], color='gray', linestyle='--', linewidth=1, alpha=0.5)
-    ax2.axhline(y=params['E_switch'], color='gray', linestyle='--', linewidth=1, alpha=0.5)
+    ax2.axhline(params['E_start'], color='gray', ls='--', lw=1, alpha=0.5)
+    ax2.axhline(params['E_switch'], color='gray', ls='--', lw=1, alpha=0.5)
     
-    # Labels
-    ax2.set_xlabel("Time (sec)", fontsize=12)
-    ax2.set_ylabel("Potential (V)", fontsize=12)
-    ax2.set_title("Potential Waveform", fontsize=14, fontweight='bold')
+    # Labels and formatting
+    ax2.set_xlabel('Time (s)', fontsize=12)
+    ax2.set_ylabel('Potential (V)', fontsize=12)
+    ax2.set_title('Potential Waveform', fontsize=14, fontweight='bold')
     ax2.grid(True, alpha=0.3)
     
     plt.tight_layout()
     
+    # Save if path provided
     if save_path:
-        plt.savefig(save_path, dpi=300)
-        print(f"Combined figure saved to: {save_path}")
+        plt.savefig(save_path, dpi=150)
+        print(f"Plot saved to {save_path}")
     
     return fig, axes
 
 
-def plot_all_cycles(result: dict, save_path: str = None):
+def plot_all_cycles(result, save_path=None):
     """
     Plot all CV cycles overlaid on one graph.
     
-    Useful for seeing how the system evolves toward steady state:
+    Useful for visualizing the approach to steady state:
     - Cycle 1: Asymmetric (|ipa/ipc| > 1)
     - Cycle 2: More symmetric
-    - Cycle 3+: Approaching steady state (|ipa/ipc| ≈ 1)
+    - Cycle 3+: Near steady state (|ipa/ipc| ≈ 1)
     
     Parameters:
-        result: Dictionary returned by simulate_cv_multicycle()
-        save_path: If provided, save figure to this path
+    -----------
+        result : dict
+            Output from simulate_cv_stable()
+        save_path : str, optional
+            If provided, save figure to this path
     
     Returns:
-        fig, ax: Matplotlib figure and axis objects
+    --------
+        fig, ax : matplotlib figure and axis objects
     """
     fig, ax = plt.subplots(figsize=(8, 6))
     
@@ -1101,26 +1125,24 @@ def plot_all_cycles(result: dict, save_path: str = None):
     
     # Plot each cycle
     for idx, cycle in enumerate(result['cycle_data']):
-        label = f"Cycle {cycle['cycle_num']}"
-        ax.plot(cycle['E'], cycle['i'] * 1e6, lw=2, color=colors[idx], label=label)
+        ax.plot(cycle['E'], cycle['i'] * 1e6, lw=1.5, color=colors[idx], 
+                label=f"Cycle {cycle['cycle_num']}")
     
-    # Reference lines
-    ax.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
-    ax.axvline(x=result['params']['E0'], color='k', linestyle='--', 
-               linewidth=0.5, alpha=0.5, label=f"E° = {result['params']['E0']} V")
+    # Reference line at zero current
+    ax.axhline(0, color='gray', lw=0.5)
     
-    # Labels
-    ax.set_xlabel("Potential (V)", fontsize=12)
-    ax.set_ylabel("Current (µA)", fontsize=12)
-    ax.set_title("Cyclic Voltammograms — All Cycles", fontsize=14)
-    ax.legend(loc='best', fontsize=10)
+    # Labels and formatting
+    ax.set_xlabel('Potential (V)', fontsize=12)
+    ax.set_ylabel('Current (µA)', fontsize=12)
+    ax.set_title('All CV Cycles', fontsize=14, fontweight='bold')
+    ax.legend(loc='best')
     ax.grid(True, alpha=0.3)
     
     plt.tight_layout()
     
+    # Save if path provided
     if save_path:
-        plt.savefig(save_path, dpi=300)
-        print(f"All cycles plot saved to: {save_path}")
+        plt.savefig(save_path, dpi=150)
     
     return fig, ax
 
@@ -1131,125 +1153,130 @@ def plot_all_cycles(result: dict, save_path: str = None):
 
 def main():
     """
-    Main function to run the CV simulation and generate all plots.
+    Main function to run CV simulation and generate output.
     
     WORKFLOW:
     =========
         1. Define simulation parameters
         2. Run simulation
         3. Analyze peaks for each cycle
-        4. Generate plots:
-           - CV and waveform side by side
-           - All cycles overlaid
-           - Just the potential waveform
+        4. Compare to theoretical predictions
+        5. Generate and save plots
     """
     
+    print("="*60)
+    print("STABLE CV SIMULATION")
+    print("="*60)
+    
     # =========================================================================
-    # SIMULATION PARAMETERS
+    # DEFINE PARAMETERS
     # =========================================================================
     
     params = dict(
-        # ----- Electrochemical parameters -----
-        E0=0.0,            # Formal potential [V] - equilibrium potential of redox couple
-        E_start=-0.25,     # Start potential [V] - begin at negative for oxidative-first scan
-        E_switch=0.25,     # Switching potential [V] - vertex of triangular wave
-        v=0.2,             # Scan rate [V/s] - how fast we sweep potential
-        n_electrons=1,     # Number of electrons in reaction: O + ne⁻ ⇌ R
-        T=298.15,          # Temperature [K] = 25°C (room temperature)
-        alpha=0.5,         # Transfer coefficient - symmetry of activation barrier
-        k0=0.2,            # Standard rate constant [cm/s] - electron transfer speed
+        # Electrochemical parameters
+        E0=0.0,            # Formal potential [V]
+        E_start=-0.25,     # Start potential [V]
+        E_switch=0.25,     # Switching potential [V]
+        v=0.2,             # Scan rate [V/s]
+        n_electrons=1,     # Electrons transferred
+        T=298.15,          # Temperature [K]
+        alpha=0.5,         # Transfer coefficient
+        k0=0.2,            # Rate constant [cm/s]
         
-        # ----- Species properties -----
+        # Species properties
         DO=7e-6,           # Diffusion coefficient of O [cm²/s]
-        DR=7e-6,           # Diffusion coefficient of R [cm²/s] (equal = symmetric diffusion)
-        C_total=1e-6,      # Total concentration [mol/cm³] = 1 mM
+        DR=7e-6,           # Diffusion coefficient of R [cm²/s]
+        C_total=1e-6,      # Concentration [mol/cm³]
         
-        # ----- Electrode -----
+        # Electrode
         A=0.071,           # Electrode area [cm²]
+        L=0.10,            # Domain length [cm]
         
-        # ----- Numerical parameters -----
-        L=0.10,            # Domain size [cm] - must be >> diffusion layer thickness
-        Nx=601,            # Spatial grid points (more = more accurate, slower)
-        dt=2e-4,           # Time step [s] (smaller = more accurate, slower)
-        n_cycles=3,        # Number of CV cycles to simulate
-        
-        # ----- Picard iteration (nonlinear solver) -----
-        relax0=0.05,       # Relaxation factor (0.05-0.1 is usually stable)
-        picard_max=120,    # Maximum iterations per time step
-        J_cap_factor=50.0, # Safety limit for flux
-        exp_clamp=50.0,    # Safety limit for exponentials
+        # Numerical parameters (STABLE values)
+        Nx=301,            # Grid points
+        dt=2e-4,           # Time step [s]
+        n_cycles=3,        # Number of cycles
+        picard_max=50,     # Max Picard iterations
+        relax=0.08,        # Relaxation factor (KEY FOR STABILITY!)
+        tol=1e-10,         # Convergence tolerance
     )
-
+    
+    print(f"\nParameters:")
+    print(f"  Nx = {params['Nx']}, dt = {params['dt']}")
+    print(f"  relax = {params['relax']} (conservative for stability)")
+    print(f"  n_cycles = {params['n_cycles']}")
+    
     # =========================================================================
     # RUN SIMULATION
     # =========================================================================
     
-    print("="*60)
-    print("CYCLIC VOLTAMMETRY SIMULATION")
-    print("="*60)
-    print(f"\nParameters:")
-    print(f"  E_start  = {params['E_start']} V")
-    print(f"  E_switch = {params['E_switch']} V")
-    print(f"  E0       = {params['E0']} V")
-    print(f"  Scan rate = {params['v']} V/s")
-    print(f"  Cycles   = {params['n_cycles']}")
-    print(f"  k0       = {params['k0']} cm/s")
-    print(f"\nRunning simulation...")
-    
-    result = simulate_cv_multicycle(**params)
-    
-    print("Done!")
+    print("\nRunning simulation...")
+    result = simulate_cv_stable(**params)
     
     # =========================================================================
     # ANALYZE RESULTS
     # =========================================================================
     
     print("\n" + "-"*60)
-    print("PEAK ANALYSIS")
+    print("RESULTS:")
     print("-"*60)
     
     for cycle in result['cycle_data']:
-        stats = analyze_cycle_peaks(
-            cycle['E'], cycle['i'],
-            params['E_start'], params['E_switch']
-        )
+        stats = analyze_peaks(cycle['E'], cycle['i'],
+                             params['E_start'], params['E_switch'])
         print(f"\nCycle {cycle['cycle_num']}:")
         print(f"  Anodic peak:   E_pa = {stats['E_pa']:+.4f} V,  i_pa = {stats['i_pa']*1e6:+.2f} µA")
         print(f"  Cathodic peak: E_pc = {stats['E_pc']:+.4f} V,  i_pc = {stats['i_pc']*1e6:+.2f} µA")
-        print(f"  ΔE_p = {stats['delta_Ep']*1000:.1f} mV  (theory: 59 mV for reversible)")
-        print(f"  |i_pa/i_pc| = {stats['ratio']:.4f}  (theory: 1.0 for reversible)")
+        print(f"  ΔEp = {stats['delta_Ep']*1000:.1f} mV")
+        print(f"  |ipa/ipc| = {stats['ratio']:.4f}")
+    
+    # =========================================================================
+    # THEORETICAL COMPARISON
+    # =========================================================================
+    
+    print("\n" + "-"*60)
+    print("THEORETICAL COMPARISON:")
+    print("-"*60)
+    print(f"  Expected ΔEp (reversible): 59.0 mV")
+    print(f"  Expected |ipa/ipc| (steady state): 1.0")
+    
+    # Randles-Sevcik equation for peak current
+    # i_p = 0.4463 × nFAC × √(nFvD/RT)
+    n, D, C, v, A = 1, 7e-6, 1e-6, 0.2, 0.071
+    i_theory = 0.4463 * n * F * A * C * np.sqrt(n * F * v * D / (R_gas * 298.15))
+    print(f"\n  Randles-Sevcik theoretical i_p: {i_theory*1e6:.2f} µA")
+    
+    # Compare to simulation
+    last_stats = analyze_peaks(result['cycle_data'][-1]['E'], 
+                               result['cycle_data'][-1]['i'],
+                               params['E_start'], params['E_switch'])
+    print(f"  Simulated i_pa (last cycle):   {last_stats['i_pa']*1e6:.2f} µA")
+    print(f"  Agreement: {100*last_stats['i_pa']/i_theory:.1f}%")
     
     # =========================================================================
     # GENERATE PLOTS
     # =========================================================================
     
-    print("\n" + "-"*60)
-    print("GENERATING PLOTS")
-    print("-"*60)
-    
     os.makedirs("plots", exist_ok=True)
     
-    # Plot 1: CV and waveform side by side (like the reference image)
-    print("\n1. CV + Waveform (side by side)...")
-    plot_cv_and_waveform(result, save_path="plots/cv_and_waveform.png")
+    # Plot 1: CV and waveform side by side
+    plot_results(result, "plots/cv_stable.png")
     
     # Plot 2: All cycles overlaid
-    print("2. All cycles overlaid...")
-    plot_all_cycles(result, save_path="plots/cv_all_cycles.png")
-    
-    # Plot 3: Just the potential waveform
-    print("3. Potential waveform only...")
-    plot_potential_waveform(result['t'], result['E'], result['params'], 
-                           save_path="plots/potential_waveform.png")
+    plot_all_cycles(result, "plots/cv_all_cycles.png")
     
     print("\n" + "="*60)
-    print("All plots saved to ./plots/")
+    print("Plots saved to ./plots/")
     print("="*60)
     
-    # Show plots
     plt.show()
+    
+    return result
 
-# RUN MAIN
+
+# =============================================================================
+# SCRIPT ENTRY POINT
+# =============================================================================
 
 if __name__ == "__main__":
     main()
