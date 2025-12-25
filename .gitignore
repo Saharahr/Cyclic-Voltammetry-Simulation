@@ -28,8 +28,5 @@ Thumbs.db
 *.tmp
 *.bak
 
-# Ignore all plots by default
-plots/*
-
 # Track the main result figure
 !plots/cv_duck_shape.png
