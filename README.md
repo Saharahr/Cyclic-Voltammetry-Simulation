@@ -72,7 +72,6 @@ pip install numpy matplotlib
 # Optional: Install SciPy for faster matrix solving
 pip install scipy
 ```
-
 ---
 
 ## Usage
