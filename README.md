@@ -1,145 +1,285 @@
-# Cyclic Voltammetry Simulation (Diffusion + Butler–Volmer)
+# Cyclic Voltammetry (CV) Simulation
 
-This project presents a physics-based simulation of a **cyclic voltammogram (CV)**
-for a one-electron redox couple using diffusion and Butler–Volmer kinetics.
-The model reproduces the characteristic **duck-shaped CV** and demonstrates
-the transition from kinetic control to diffusion-limited behavior in a
-quasi-reversible electrochemical system.
-for a one-electron redox couple using:
+A Python-based numerical simulation of cyclic voltammetry for a two-species redox system using the Crank-Nicolson finite difference method with Butler-Volmer electrode kinetics.
 
-- 1D diffusion (Fick’s second law)
-- Butler–Volmer electrode kinetics
-- Flux (Neumann) boundary condition at the electrode
-- Crank–Nicolson time integration
-- Picard iteration for nonlinear coupling
+![CV Simulation](plots/cv_stable.png)
 
-The goal is to reproduce the characteristic **duck-shaped CV** observed in experiments
-and discussed in classical electrochemistry literature.
 
----
-
-## Physical Model
-
-The redox reaction is:
-
-### Governing equation (diffusion)
-
-The oxidized species concentration follows Fick’s second law:
-
-dC_O/dt = D · d²C_O/dx²
-
-Mass conservation is enforced:
-
-C_O + C_R = C_bulk
-
-### Electrode kinetics (Butler–Volmer)
-
-The interfacial current density is given by:
-
-j = n F k0 [ C_O(0,t) · exp(-αFη/RT) − C_R(0,t) · exp((1−α)Fη/RT) ]
-
-**Electrode (x = 0)**  
-Flux boundary condition:
-
-−D (∂C_O/∂x)|_(x=0) = j / (nF)
-
-**Bulk (x = L)**  
-C_O(L,t) = C_bulk
-
-This represents classical semi-infinite diffusion.
+- [Overview](#overview)
+- [Physical System](#physical-system)
+- [Features](#features)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Results](#results)
+- [Theory](#theory)
+- [Parameters](#parameters)
+- [File Structure](#file-structure)
+- [License](#license)
 
 ---
 
-## Numerical Method
+## Overview
 
-- Spatial discretization: finite differences (1D)
-- Time integration: Crank–Nicolson (second-order accurate)
-- Nonlinear coupling: Picard (fixed-point) iteration
-- Stability safeguards:
-  - Under-relaxation
-  - Positivity enforcement for concentrations
+This project simulates the electrochemical technique of **Cyclic Voltammetry (CV)**, which is widely used in electrochemistry to study redox reactions, determine formal potentials, and characterize electrode kinetics.
+
+The simulation solves:
+1. **Fick's Second Law** for diffusion of species in solution
+2. **Butler-Volmer equation** for electrode kinetics
+
+Using:
+- **Crank-Nicolson method** (implicit, unconditionally stable, 2nd-order accurate)
+- **Thomas algorithm** for efficient tridiagonal matrix solving
+- **Picard iteration** for nonlinear coupling between current and concentration
+
+---
+
+## Physical System
+
+The simulation models a simple one-electron redox reaction:
+
+```
+O + e⁻  ⇌  R
+```
+
+Where:
+- **O** = Oxidized species (electron acceptor)
+- **R** = Reduced species (electron donor)
+- **e⁻** = Electron
+
+### Sign Convention (IUPAC/Ossila)
+
+| Process | Current Sign |
+|---------|--------------|
+| Oxidation (R → O + e⁻) | Positive (anodic) |
+| Reduction (O + e⁻ → R) | Negative (cathodic) |
+
+---
+
+## Features
+
+- ✅ Two-species diffusion (O and R) with independent diffusion coefficients
+- ✅ Butler-Volmer electrode kinetics with adjustable rate constant
+- ✅ Multiple CV cycles to observe approach to steady state
+- ✅ Automatic peak detection and analysis
+- ✅ Comparison with Randles-Sevcik theoretical predictions
+- ✅ Fully commented code for educational purposes
+- ✅ Publication-quality plotting
+
+---
+
+## Installation
+
+### Requirements
+
+- Python 3.7+
+- NumPy
+- Matplotlib
+
+### Setup
+
+```bash
+# Clone or download the project
+git clone https://github.com/yourusername/cv-simulation.git
+cd cv-simulation
+
+# Install dependencies
+pip install numpy matplotlib
+
+# Optional: Install SciPy for faster matrix solving
+pip install scipy
+```
+
+---
+
+## Usage
+
+### Basic Usage
+
+```bash
+python cv_stable_commented.py
+```
+
+### Custom Parameters
+
+```python
+from cv_stable_commented import simulate_cv_stable, plot_results
+
+# Run simulation with custom parameters
+result = simulate_cv_stable(
+    E0=0.0,           # Formal potential [V]
+    E_start=-0.25,    # Starting potential [V]
+    E_switch=0.25,    # Switching potential [V]
+    v=0.2,            # Scan rate [V/s]
+    k0=0.2,           # Rate constant [cm/s]
+    C_total=1e-6,     # Concentration [mol/cm³]
+    n_cycles=3,       # Number of cycles
+)
+
+# Plot results
+plot_results(result, save_path="cv_stable.png")
+```
+
+### Output
+
+The simulation outputs:
+1. **Console**: Peak analysis for each cycle
+2. **Plots**: CV curve and potential waveform saved to `./plots/`
 
 ---
 
 ## Results
 
-Below is an updated README.md Results section (and a small wording tweak in the introduction) that accurately reflects your final, correct simulation output.
+### Simulation Parameters
 
-You can copy–paste this directly to replace the corresponding parts of your existing README.
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| E⁰ | 0.0 V | Formal potential |
+| E_start | -0.25 V | Starting potential |
+| E_switch | +0.25 V | Switching potential |
+| v | 0.2 V/s | Scan rate |
+| n | 1 | Electrons transferred |
+| α | 0.5 | Transfer coefficient |
+| k⁰ | 0.2 cm/s | Standard rate constant |
+| D_O, D_R | 7×10⁻⁶ cm²/s | Diffusion coefficients |
+| C | 1 mM | Concentration |
+| A | 0.071 cm² | Electrode area |
 
-🔹 Update 1: Short description (top of README)
+### Peak Analysis
 
-Replace the first paragraph with this (minor refinement):
+| Cycle | E_pa (V) | i_pa (µA) | E_pc (V) | i_pc (µA) | ΔE_p (mV) | \|i_pa/i_pc\| |
+|-------|----------|-----------|----------|-----------|-----------|---------------|
+| 1 | +0.0290 | +22.47 | -0.0297 | -16.17 | 58.7 | 1.389 |
+| 2 | +0.0295 | +20.68 | -0.0296 | -16.98 | 59.1 | 1.218 |
+| 3 | +0.0296 | +20.19 | -0.0296 | -17.32 | 59.1 | 1.166 |
 
-This project presents a physics-based simulation of a **cyclic voltammogram (CV)**
-for a one-electron redox couple using diffusion and Butler–Volmer kinetics.
-The model reproduces the characteristic **duck-shaped CV** and demonstrates
-the transition from kinetic control to diffusion-limited behavior in a
-quasi-reversible electrochemical system.
+### Theoretical Comparison
 
-🔹 Update 2: Replace the Results section entirely
-✅ New Results section (final, correct)
-## Results
+| Metric | Simulated | Theory | Agreement |
+|--------|-----------|--------|-----------|
+| ΔE_p | 59.1 mV | 59.0 mV | ✅ Excellent |
+| i_pa (Cycle 1) | 22.47 µA | 22.57 µA (Randles-Sevcik) | ✅ 99.6% |
+| \|i_pa/i_pc\| | 1.17 → 1.0 | 1.0 (steady state) | ✅ Approaching |
 
-The simulation successfully reproduces the characteristic **duck-shaped cyclic voltammogram**
-expected for a diffusion-controlled, quasi-reversible redox couple under a triangular
-potential waveform.
+### Key Observations
 
-The results were obtained using:
+1. **Peak Separation (ΔE_p ≈ 59 mV)**: Confirms reversible electron transfer kinetics, matching the theoretical value of 59/n mV at 25°C.
 
-- Diffusion with semi-infinite boundary behavior
-- Butler–Volmer electrode kinetics (finite \(k_0\))
-- Flux boundary condition at the electrode
-- Noise-controlled Crank–Nicolson time integration
+2. **Peak Current Ratio**: 
+   - Cycle 1: |i_pa/i_pc| = 1.39 (asymmetric due to initial conditions)
+   - Cycle 3: |i_pa/i_pc| = 1.17 (approaching unity)
+   - With more cycles, this ratio approaches 1.0 as expected for a reversible system.
 
-### Simulated cyclic voltammogram
+3. **Randles-Sevcik Validation**: The simulated peak current (22.47 µA) matches the theoretical prediction (22.57 µA) within 0.5%, confirming correct implementation of diffusion physics.
 
-![Diffusion equation](plots/cv_stable.png)
-
-### Quantitative peak analysis
-
-The automatically extracted peak parameters are:
-
-- **Cathodic peak (forward scan):**
-  - E_pc = -0.0296 V,
-  - i_pc = -17.32 µA
-- **Anodic peak (reverse scan):**
-  - E_pa = 0.0296 V
-  - i_pa = 20.19 µA
-
-- **Peak separation:**
-  ΔE_p = 59.1 mV
-
-- **Peak current ratio:**
-  |i_pa / i_pc| = 1.1659
-
-### Interpretation
-
-- The peak separation of approximately **59.1 mV** is close to the theoretical
-  value of **59 mV** expected for a reversible one-electron redox process at
-  room temperature.
-- The unequal peak magnitudes indicate **quasi-reversible behavior**, caused
-  by finite electron-transfer kinetics (\(k_0\)) rather than numerical error.
-- The smooth decay of current after each peak confirms **classical semi-infinite
-  diffusion control**, where current decreases as the diffusion layer grows.
-- The overall shape and symmetry of the CV are consistent with textbook
-  cyclic voltammetry behavior, as described by Elgrishi *et al.* (2017).
-
-These results demonstrate that the implemented numerical model correctly
-captures the coupled effects of diffusion and electrode kinetics in cyclic
-voltammetry.
 ---
-## Conclusion
 
-This project demonstrates a fully self-consistent numerical simulation of
-cyclic voltammetry, combining diffusion physics with Butler–Volmer kinetics.
-The model reproduces key experimental observables such as peak currents,
-peak separation, and diffusion-limited current decay, providing a robust
-framework for studying reversible and quasi-reversible electrochemical systems.
----
-Desinged By Sahar Ahrari
----
-References
+## Theory
 
-Elgrishi et al., A Practical Beginner’s Guide to Cyclic Voltammetry,
-Journal of Chemical Education, 2017.
+### Governing Equations
+
+#### 1. Diffusion (Fick's Second Law)
+
+$$\frac{\partial C}{\partial t} = D \frac{\partial^2 C}{\partial x^2}$$
+
+Where:
+- C = concentration [mol/cm³]
+- D = diffusion coefficient [cm²/s]
+- x = distance from electrode [cm]
+- t = time [s]
+
+#### 2. Electrode Kinetics (Butler-Volmer)
+
+$$j = nFk^0 \left[ C_O(0) e^{-\alpha \beta \eta} - C_R(0) e^{(1-\alpha) \beta \eta} \right]$$
+
+Where:
+- j = current density [A/cm²]
+- k⁰ = standard rate constant [cm/s]
+- η = E - E⁰ = overpotential [V]
+- α = transfer coefficient
+- β = nF/RT ≈ 38.9 V⁻¹ at 25°C
+
+#### 3. Randles-Sevcik Equation (Peak Current)
+
+$$i_p = 0.4463 \cdot nFAC^* \sqrt{\frac{nFvD}{RT}}$$
+
+This equation predicts the peak current for a reversible CV and is used to validate the simulation.
+
+### Numerical Methods
+
+| Method | Purpose | Complexity |
+|--------|---------|------------|
+| Crank-Nicolson   | Solve diffusion equation | O(Nx) per step |
+| Thomas Algorithm | Solve tridiagonal system | O(Nx) |
+| Picard Iteration | Handle nonlinear coupling | 10-50 iterations |
+
+### Boundary Conditions
+
+| Location | Type | Condition |
+|----------|------|-----------|
+| x = 0 (electrode) | Flux BC | J = -D ∂C/∂x = j/(nF) |
+| x = L (bulk) | Neumann | ∂C/∂x = 0 |
+
+---
+
+## Parameters
+
+### Electrochemical Parameters
+
+| Parameter | Symbol | Default | Range | Description |
+|-----------|--------|---------|-------|-------------|
+| Formal potential | E⁰ | 0.0 V | -2 to +2 V | Equilibrium potential |
+| Scan rate | v | 0.2 V/s | 0.001-10 V/s | Potential sweep rate |
+| Transfer coefficient | α | 0.5 | 0.3-0.7 | Symmetry of barrier |
+| Rate constant | k⁰ | 0.2 cm/s | 10⁻⁷-1 cm/s | Electron transfer rate |
+
+### Numerical Parameters
+
+| Parameter | Symbol | Default | Description |
+|-----------|--------|---------|-------------|
+| Grid points | Nx | 301 | Spatial resolution |
+| Time step | dt | 2×10⁻⁴ s | Temporal resolution |
+| Relaxation | relax | 0.08 | Picard iteration damping |
+| Tolerance | tol | 10⁻¹⁰ | Convergence criterion |
+
+### Stability Guidelines
+
+```
+λ = D·dt/dx² < 1    (for accuracy)
+Nx > 10·δ/L         (resolve diffusion layer)
+relax ≈ 0.05-0.10   (prevent oscillation)
+```
+
+---
+
+## Performance
+
+| Configuration | Time | Accuracy |
+|---------------|------|----------|
+| Nx=601, dt=2e-4, 3 cycles | ~10 min | Excellent |
+| Nx=301, dt=2e-4, 3 cycles | ~3 min | Very Good |
+| Nx=101, dt=1e-3, 1 cycle | ~30 sec | Good |
+
+---
+
+## References
+
+1. Bard, A.J. and Faulkner, L.R. *Electrochemical Methods: Fundamentals and Applications*, 2nd ed., Wiley, 2001.
+
+2. Compton, R.G. and Banks, C.E. *Understanding Voltammetry*, 2nd ed., Imperial College Press, 2011.
+
+3. Nicholson, R.S. and Shain, I. "Theory of Stationary Electrode Polarography", *Anal. Chem.*, 1964, 36, 706-723.
+
+4. Crank, J. and Nicolson, P. "A practical method for numerical evaluation of solutions of partial differential equations of the heat-conduction type", *Proc. Camb. Phil. Soc.*, 1947, 43, 50-67.
+
+5. Elgrishi et al., A Practical Beginner’s Guide to Cyclic Voltammetry, Journal of Chemical Education, 2017.
+---
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit issues or pull requests.
+
+---
+
+## Contact
+
+For questions or feedback, please open an issue on GitHub.
